@@ -60,3 +60,13 @@ Select Application
    +--> Object Detection UI
    |
    +--> Fluid Level Measurement UI
+
+## 5. Cloud Services
+
+- Service is available on Azure
+- The sensor functions as IoT device on cloud
+- gRPC makes the data available, but no data is saved on the cloud.
+- Data is exchanged uisng remote produre calls
+- Stage 1 has fixed device in service provider's cloud 
+- Client has no option to configure his/her own cloud and also no tenant model is available to keep things simple
+
