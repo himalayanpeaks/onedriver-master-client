@@ -75,3 +75,7 @@ Select Application
 
 ![Welcome Page](image-1.png)
 ![Sensor intro page](image-2.png)
+
+Depending upon the application selected, the following page shall have animation for either object detection or level measurement
+
+![Object Detection](image-3.png)
