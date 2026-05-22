@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OneDriver Ultrasonic WebUI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="page-shell">
+    <div class="ambient ambient-a"></div>
+    <div class="ambient ambient-b"></div>
+
+    <header class="hero-card glass">
+      <div class="hero-copy">
+        <p class="eyebrow">OneDriver Cloud POC</p>
+        <h1>Ultrasonic sensor web UI</h1>
+        <p class="hero-text">
+          Connect to the sensor cloud, load the predefined ultrasonic sensor, switch between object detection and fluid level measurement, and edit basic sensor parameters in place.
+        </p>
+        <div class="hero-actions">
+          <button id="connectBtn" class="primary-btn">Connect to Cloud</button>
+          <button id="loadSensorBtn" class="secondary-btn">Load Ultrasonic Sensor</button>
+        </div>
+      </div>
+
+      <aside class="status-stack">
+        <div class="status-chip" id="cloudStatusChip">Cloud bridge not checked</div>
+        <div class="status-chip dim" id="sensorStatusChip">Sensor not loaded</div>
+        <div class="status-chip dim" id="liveStatusChip">Live stream idle</div>
+      </aside>
+    </header>
+
+    <main class="layout-grid">
+      <section class="scene-card glass">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Live process visualization</p>
+            <h2>Application view</h2>
+          </div>
+          <div class="tab-switcher">
+            <button class="tab-btn active" data-application="object">Object Detection</button>
+            <button class="tab-btn" data-application="fluid">Fluid Level Measurement</button>
+          </div>
+        </div>
+
+        <div class="scene-meta">
+          <div>
+            <span class="meta-label">Master</span>
+            <strong id="masterIdLabel">master-01</strong>
+          </div>
+          <div>
+            <span class="meta-label">Process parameter</span>
+            <strong id="processParameterLabel">--</strong>
+          </div>
+          <div>
+            <span class="meta-label">Current value</span>
+            <strong id="currentValueLabel">--</strong>
+          </div>
+          <div>
+            <span class="meta-label">Cloud mode</span>
+            <strong id="sourceModeLabel">Demo</strong>
+          </div>
+        </div>
+
+        <div class="scene-stage">
+          <div class="scene object-scene active" id="objectScene">
+            <div class="sensor-head"></div>
+            <div class="beam"></div>
+            <div class="track"></div>
+            <div class="target-object" id="targetObject"></div>
+            <div class="switching-signals" id="switchingSignals">
+              <span class="switching-empty">No switching signal yet</span>
+            </div>
+            <div class="distance-ruler">
+              <span id="nearDistanceLabel">Near</span>
+              <span id="farDistanceLabel">Far</span>
+            </div>
+          </div>
+
+          <div class="scene fluid-scene" id="fluidScene">
+            <div class="tank-shell">
+              <div class="tank-fill" id="tankFill"></div>
+              <div class="tank-glass"></div>
+            </div>
+            <div class="fluid-sensor-note">
+              <strong>Fluid level</strong>
+              <p>Higher fill means the sensor sees a shorter distance.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="control-card glass">
+        <div class="section-head compact">
+          <div>
+            <p class="eyebrow">Session</p>
+            <h2>Cloud bridge</h2>
+          </div>
+        </div>
+
+        <div class="status-panel">
+          <div class="metric">
+            <span>Cloud</span>
+            <strong id="cloudMetric">Disconnected</strong>
+          </div>
+          <div class="metric">
+            <span>Sensor</span>
+            <strong id="sensorMetric">Waiting</strong>
+          </div>
+          <div class="metric">
+            <span>Mode</span>
+            <strong id="modeMetric">Object Detection</strong>
+          </div>
+        </div>
+
+        <div class="config-card">
+          <label>
+            API base URL
+            <input id="apiBaseUrl" type="url" placeholder="http://localhost:5092" />
+          </label>
+          <label>
+            Master ID
+            <input id="masterIdInput" type="text" value="master-01" />
+          </label>
+          <label>
+            Port number
+            <input id="portNumberInput" type="number" value="0" min="0" />
+          </label>
+        </div>
+
+        <form id="writeForm" class="parameter-form">
+          <label>
+            Parameter display name
+            <input id="writeName" type="text" placeholder="Enter a DisplayName from the table" />
+          </label>
+          <label>
+            Value
+            <input id="writeValue" type="text" placeholder="100" />
+          </label>
+          <button class="primary-btn full-width" type="submit">Write Parameter</button>
+        </form>
+
+        <div class="log-panel">
+          <div class="section-head compact">
+            <div>
+              <p class="eyebrow">Activity</p>
+              <h3>Recent events</h3>
+            </div>
+          </div>
+          <ul id="activityLog" class="activity-log"></ul>
+        </div>
+      </aside>
+    </main>
+
+    <section class="parameters-card glass">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">GetAllParams</p>
+          <h2 id="parameterTableTitle">Editable sensor parameters</h2>
+        </div>
+        <div class="parameter-actions">
+          <button id="refreshParamsBtn" class="secondary-btn">Refresh Parameters</button>
+        </div>
+      </div>
+
+      <div class="variable-tabs">
+        <button class="variable-tab-btn active" data-tab="all">All</button>
+        <button class="variable-tab-btn" data-tab="specific">Specific</button>
+        <button class="variable-tab-btn" data-tab="standard">Standard Params</button>
+        <button class="variable-tab-btn" data-tab="commands">Commands</button>
+        <button class="variable-tab-btn" data-tab="other">Other</button>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Value</th>
+              <th>Type</th>
+              <th>Index</th>
+              <th>Sub</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="parameterTableBody">
+            <tr>
+              <td colspan="6" class="empty-state">Connect and load the sensor to populate parameters.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

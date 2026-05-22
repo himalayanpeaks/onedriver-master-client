@@ -1,0 +1,13 @@
+{
+  "name": "onedriver-ultrasonic-webui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Standalone WebUI for the OneDriver ultrasonic sensor proof of concept.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.3",
+    "@grpc/proto-loader": "^0.8.1"
+  }
+}
