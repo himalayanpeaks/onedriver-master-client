@@ -174,12 +174,81 @@ function inferVariableKind(variable, sourceKind = 'parameter') {
   return 'Other';
 }
 
+function processSignalScore(parameter) {
+  const label = `${parameter?.displayName || ''} ${parameter?.name || ''}`.toLowerCase();
+  let score = 0;
+
+  if (/\bmdc\b/.test(label) && (/measurement\s*value/.test(label) || /\bdistance\b/.test(label))) {
+    score += 320;
+  }
+
+  if (/mdc|measurement\s*value|distance|range|level|actual|measure|output/.test(label)) {
+    score += 120;
+  }
+
+  if (/switching\s*signal|\bssc\b/.test(label)) {
+    score -= 80;
+  }
+
+  if (/scale|descriptor|device\s*char|sensrng|min\.\s*sensing\s*range|max\.\s*sensing\s*range|\bminimum\b|\bmaximum\b|\bmin\b|\bmax\b/.test(label)) {
+    score -= 220;
+  }
+
+  if (/teach|tag|config|mode|product|location|uri|install|command|\bcmd\b/.test(label)) {
+    score -= 140;
+  }
+
+  if (/int|uint|float|double/i.test(String(parameter?.dataType || ''))) {
+    score += 20;
+  }
+
+  return score;
+}
+
 function pickProcessParameter(parameters) {
-  const preferred = parameters.find((param) => /distance|range|level|actual|measure|output/i.test(param.displayName || param.name))
-    || parameters.find((param) => /int|uint|float|double/i.test(param.dataType))
+  if (!parameters?.length) {
+    return '';
+  }
+
+  const preferred = [...parameters]
+    .sort((left, right) => processSignalScore(right) - processSignalScore(left))[0]
     || parameters[0];
 
   return preferred?.name || '';
+}
+
+async function getDescriptorByName(masterId) {
+  const descriptor = await callGrpc('GetDescriptor', { masterId });
+  const descriptorParameters = descriptor.parameters || [];
+  const descriptorByName = new Map(descriptorParameters.map((variable) => [variable?.name || '', variable]));
+
+  return {
+    descriptor,
+    descriptorByName,
+  };
+}
+
+function enrichParameterWithDescriptor(parameter, descriptorByName) {
+  const descriptorVariable = descriptorByName.get(parameter.name) || null;
+  return {
+    ...parameter,
+    displayName: descriptorVariable?.displayName || parameter.displayName || parameter.name,
+    index: descriptorVariable?.index || parameter.index,
+    subindex: descriptorVariable?.subindex || parameter.subindex,
+    dataType: descriptorVariable?.dataType || parameter.dataType,
+    minimum: descriptorVariable?.minimum || parameter.minimum,
+    maximum: descriptorVariable?.maximum || parameter.maximum,
+    variableKind: inferVariableKind(descriptorVariable || parameter, 'parameter'),
+  };
+}
+
+async function getEnrichedParameterValues(masterId, portNumber) {
+  const [parameters, { descriptorByName }] = await Promise.all([
+    getAllParameterValues(masterId, portNumber),
+    getDescriptorByName(masterId),
+  ]);
+
+  return parameters.map((parameter) => enrichParameterWithDescriptor(parameter, descriptorByName));
 }
 
 async function getAllParameterValues(masterId, portNumber) {
@@ -255,24 +324,8 @@ const server = http.createServer(async (req, res) => {
       const masterId = body.masterId || defaultMasterId;
       const portNumber = Number.isFinite(body.portNumber) ? Number(body.portNumber) : defaultPortNumber;
 
-      const descriptor = await callGrpc('GetDescriptor', { masterId });
-      const parameters = await getAllParameterValues(masterId, portNumber);
-      const descriptorParameters = descriptor.parameters || [];
-      const descriptorByName = new Map(descriptorParameters.map((variable) => [variable?.name || '', variable]));
-
-      const enrichedParameters = parameters.map((parameter) => {
-        const descriptorVariable = descriptorByName.get(parameter.name) || null;
-        return {
-          ...parameter,
-          displayName: descriptorVariable?.displayName || parameter.displayName || parameter.name,
-          index: descriptorVariable?.index || parameter.index,
-          subindex: descriptorVariable?.subindex || parameter.subindex,
-          dataType: descriptorVariable?.dataType || parameter.dataType,
-          minimum: descriptorVariable?.minimum || parameter.minimum,
-          maximum: descriptorVariable?.maximum || parameter.maximum,
-          variableKind: inferVariableKind(descriptorVariable || parameter, 'parameter'),
-        };
-      });
+      const { descriptor } = await getDescriptorByName(masterId);
+      const enrichedParameters = await getEnrichedParameterValues(masterId, portNumber);
 
       const commands = (descriptor.commands || []).map((command) => ({
         ...mapVariable(command, command?.name || ''),
@@ -296,7 +349,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/parameters') {
       const masterId = requestUrl.searchParams.get('masterId') || defaultMasterId;
       const portNumber = Number(requestUrl.searchParams.get('portNumber') || defaultPortNumber);
-      const parameters = await getAllParameterValues(masterId, portNumber);
+      const parameters = await getEnrichedParameterValues(masterId, portNumber);
       sendJson(res, 200, parameters);
       return;
     }
@@ -323,7 +376,9 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      sendJson(res, 200, mapVariable(result.variable, parameterName));
+      const { descriptorByName } = await getDescriptorByName(masterId);
+      const mapped = mapVariable(result.variable, parameterName);
+      sendJson(res, 200, enrichParameterWithDescriptor(mapped, descriptorByName));
       return;
     }
 
@@ -352,9 +407,12 @@ const server = http.createServer(async (req, res) => {
         portNumber,
       });
 
+      const { descriptorByName } = await getDescriptorByName(masterId);
+      const mapped = mapVariable(reread.variable, parameterName);
+
       sendJson(res, 200, {
         message: 'Parameter updated.',
-        parameter: mapVariable(reread.variable, parameterName),
+        parameter: enrichParameterWithDescriptor(mapped, descriptorByName),
       });
       return;
     }

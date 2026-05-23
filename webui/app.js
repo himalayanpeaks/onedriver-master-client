@@ -2,15 +2,15 @@ const state = {
   masterId: "master-01",
   portNumber: 0,
   application: "object",
-  processParameterName: "TN_V_SSP_SSC_SP1",
-  processParameterDisplay: "MDC - Measurement Value",
-  hasDistanceSignal: false,
+  processParameter: "",
+  processParameterLabel: "Distance MDC",
   currentValue: "--",
   normalizedValue: 0,
+  switchingSignals: {
+    1: false,
+    2: false,
+  },
   parameters: [],
-  commands: [],
-  activeVariableTab: "all",
-  switchingSignals: {},
   liveSource: null,
   demoTimer: null,
   useDemoMode: true,
@@ -30,10 +30,10 @@ const elements = {
   masterIdLabel: document.getElementById("masterIdLabel"),
   processParameterLabel: document.getElementById("processParameterLabel"),
   currentValueLabel: document.getElementById("currentValueLabel"),
-  farDistanceLabel: document.getElementById("farDistanceLabel"),
-  nearDistanceLabel: document.getElementById("nearDistanceLabel"),
-  switchingSignalLed: document.getElementById("switchingSignalLed"),
-  switchingSignalText: document.getElementById("switchingSignalText"),
+  switchingSignal1Led: document.getElementById("switchingSignal1Led"),
+  switchingSignal1Label: document.getElementById("switchingSignal1Label"),
+  switchingSignal2Led: document.getElementById("switchingSignal2Led"),
+  switchingSignal2Label: document.getElementById("switchingSignal2Label"),
   apiBaseUrl: document.getElementById("apiBaseUrl"),
   masterIdInput: document.getElementById("masterIdInput"),
   portNumberInput: document.getElementById("portNumberInput"),
@@ -41,10 +41,7 @@ const elements = {
   tankFill: document.getElementById("tankFill"),
   objectScene: document.getElementById("objectScene"),
   fluidScene: document.getElementById("fluidScene"),
-  variableTabButtons: Array.from(document.querySelectorAll(".variable-tab-btn")),
   parameterTableBody: document.getElementById("parameterTableBody"),
-  parameterTableTitle: document.getElementById("parameterTableTitle"),
-  switchingSignals: document.getElementById("switchingSignals"),
   writeForm: document.getElementById("writeForm"),
   writeName: document.getElementById("writeName"),
   writeValue: document.getElementById("writeValue"),
@@ -65,6 +62,90 @@ const appendLog = (message) => {
 };
 
 const getApiBaseUrl = () => elements.apiBaseUrl.value.trim().replace(/\/$/, "");
+
+const DISTANCE_MDC_LABEL = "Distance MDC";
+
+const getSignalHaystack = (candidate) => String([
+  candidate?.displayName,
+  candidate?.display_name,
+  candidate?.parameterName,
+  candidate?.name,
+].filter(Boolean).join(" ")).toLowerCase();
+
+const isDistanceMdcSignal = (candidate) => {
+  const haystack = getSignalHaystack(candidate);
+  return /\bmdc\b/.test(haystack)
+    && (/measurement\s*value/.test(haystack) || /\bdistance\b/.test(haystack))
+    && !/switching\s*signal|\bsp[12]\b|\bssc[12]\b/.test(haystack);
+};
+
+const getSwitchingSignalNumber = (candidate) => {
+  const haystack = getSignalHaystack(candidate);
+  if (/switching\s*signal\s*1|switching\s*signal.*ssc[.\s_-]*1|ssc[.\s_-]*1|\bsp1\b/.test(haystack)) {
+    return 1;
+  }
+
+  if (/switching\s*signal\s*2|switching\s*signal.*ssc[.\s_-]*2|ssc[.\s_-]*2|\bsp2\b/.test(haystack)) {
+    return 2;
+  }
+
+  return null;
+};
+
+const toBooleanSignal = (value) => {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "on" || normalized === "high";
+};
+
+const humanizeParameterName = (name) => {
+  let normalized = String(name || "").trim();
+  if (!normalized) {
+    return "Unnamed parameter";
+  }
+
+  normalized = normalized.replace(/^TN_V_/, "").replace(/^TN_/, "").replace(/^V_/, "");
+  normalized = normalized.replace(/_/g, " ").replace(/\s+/g, " ").trim();
+  return normalized || "Unnamed parameter";
+};
+
+const getParameterDisplayName = (parameter) => {
+  const preferred = String(parameter?.display_name ?? parameter?.displayName ?? "").trim();
+  if (preferred) {
+    return preferred;
+  }
+
+  return humanizeParameterName(parameter?.name);
+};
+
+const getParameterByInternalName = (name) => state.parameters.find((parameter) => parameter.name === name) || null;
+
+const getParameterLabelFromName = (name) => {
+  const parameter = getParameterByInternalName(name);
+  if (parameter) {
+    return getParameterDisplayName(parameter);
+  }
+
+  return humanizeParameterName(name);
+};
+
+const resolveParameterName = (input) => {
+  const candidate = String(input || "").trim();
+  if (!candidate) {
+    return "";
+  }
+
+  const byInternal = state.parameters.find((parameter) => parameter.name === candidate);
+  if (byInternal) {
+    return byInternal.name;
+  }
+
+  const normalized = candidate.toLowerCase();
+  const byDisplay = state.parameters.find(
+    (parameter) => getParameterDisplayName(parameter).toLowerCase() === normalized,
+  );
+
+  return byDisplay?.name || candidate;
+};
 
 const setApplication = (application) => {
   state.application = application;
@@ -99,128 +180,14 @@ const normalizeValue = (value) => {
   return Math.max(0, Math.min(1, numeric / 10000));
 };
 
-const parseNumeric = (value) => {
-  const numeric = Number.parseFloat(value);
-  return Number.isFinite(numeric) ? numeric : null;
-};
+const updateSwitchingIndicators = () => {
+  const signal1Active = Boolean(state.switchingSignals[1]);
+  const signal2Active = Boolean(state.switchingSignals[2]);
 
-const normalizeWithBounds = (value, minimum, maximum) => {
-  const numericValue = parseNumeric(value);
-  const min = parseNumeric(minimum);
-  const max = parseNumeric(maximum);
-
-  if (numericValue == null || min == null || max == null || max <= min) {
-    return normalizeValue(value);
-  }
-
-  return Math.max(0, Math.min(1, (numericValue - min) / (max - min)));
-};
-
-const toBoolean = (value) => {
-  const normalized = String(value ?? "").trim().toLowerCase();
-  return normalized === "1" || normalized === "true" || normalized === "on" || normalized === "yes";
-};
-
-const inferVariableKind = (variable) => {
-  const existing = String(variable?.variableKind || "").trim();
-  if (existing) {
-    return existing;
-  }
-
-  const index = Number(variable?.index || 0);
-  const haystack = `${variable?.displayName || ""} ${variable?.name || ""}`.toLowerCase();
-
-  if (/command|cmd\b/.test(haystack)) {
-    return "Commands";
-  }
-
-  if (/specific|vendor|application/.test(haystack) || index >= 0x4000) {
-    return "Specific";
-  }
-
-  if (/standard|\bstd\b/.test(haystack) || index > 0) {
-    return "Standard Params";
-  }
-
-  return "Other";
-};
-
-const normalizeKindKey = (kind) => {
-  const value = String(kind || "").toLowerCase();
-  if (value.includes("command")) {
-    return "commands";
-  }
-  if (value.includes("specific")) {
-    return "specific";
-  }
-  if (value.includes("standard")) {
-    return "standard";
-  }
-  return "other";
-};
-
-const getDisplayName = (variable) => String(variable?.displayName || "").trim();
-
-const getDisplayLabel = (variable, fallback = "Unnamed parameter") => {
-  const displayName = getDisplayName(variable);
-  return displayName || fallback;
-};
-
-const getAllVariables = () => [...state.parameters, ...state.commands];
-
-const findVariableByName = (name) => {
-  const normalizedName = String(name || "").trim();
-  if (!normalizedName) {
-    return null;
-  }
-
-  return getAllVariables().find((variable) => variable.name === normalizedName) || null;
-};
-
-const findVariableByInput = (input) => {
-  const normalizedInput = String(input || "").trim().toLowerCase();
-  if (!normalizedInput) {
-    return null;
-  }
-
-  return getAllVariables().find((variable) => {
-    const displayName = getDisplayName(variable).toLowerCase();
-    const internalName = String(variable.name || "").trim().toLowerCase();
-    return displayName === normalizedInput || internalName === normalizedInput;
-  }) || null;
-};
-
-const updateDistanceBounds = (minimum, maximum) => {
-  const min = parseNumeric(minimum);
-  const max = parseNumeric(maximum);
-
-  elements.farDistanceLabel.textContent = max == null ? "Far" : `Far ${max}`;
-  elements.nearDistanceLabel.textContent = min == null ? "Near" : `Near ${min}`;
-};
-
-const renderSwitchingSignals = () => {
-  const entries = Object.values(state.switchingSignals);
-  if (!entries.length) {
-    elements.switchingSignals.innerHTML = '<span class="switching-empty">No switching signal yet</span>';
-    return;
-  }
-
-  elements.switchingSignals.innerHTML = entries.slice(0, 2).map((entry) => `
-    <div class="switching-indicator">
-      <span class="switching-led ${entry.isOn ? "on" : ""}" aria-hidden="true"></span>
-      <span>${entry.label} ${entry.isOn ? "ON" : "OFF"}</span>
-    </div>
-  `).join("");
-};
-
-const updateSwitchingSignal = (name, value, signalId) => {
-  const normalizedName = String(name || "Switching signal").trim() || "Switching signal";
-  const key = signalId || normalizedName;
-  state.switchingSignals[key] = {
-    label: normalizedName,
-    isOn: toBoolean(value),
-  };
-  renderSwitchingSignals();
+  elements.switchingSignal1Led.classList.toggle("on", signal1Active);
+  elements.switchingSignal2Led.classList.toggle("on", signal2Active);
+  elements.switchingSignal1Label.textContent = `Switching Signal 1: ${signal1Active ? "ON" : "OFF"}`;
+  elements.switchingSignal2Label.textContent = `Switching Signal 2: ${signal2Active ? "ON" : "OFF"}`;
 };
 
 const updateVisualization = (normalizedValue) => {
@@ -231,7 +198,8 @@ const updateVisualization = (normalizedValue) => {
   elements.targetObject.style.setProperty("--object-shift", `${objectShift}px`);
   elements.tankFill.style.setProperty("--fill-height", `${fillHeight}%`);
   elements.currentValueLabel.textContent = state.currentValue;
-  elements.processParameterLabel.textContent = state.processParameterDisplay || "--";
+  elements.processParameterLabel.textContent = state.processParameterLabel || getParameterLabelFromName(state.processParameter);
+  updateSwitchingIndicators();
 };
 
 const setCloudState = (ready, message) => {
@@ -267,36 +235,15 @@ const fetchJson = async (url, options = {}) => {
   return response.json();
 };
 
-const getVisibleVariables = () => {
-  const allVariables = [
-    ...state.parameters.map((item) => ({ ...item, variableKind: inferVariableKind(item) })),
-    ...state.commands.map((item) => ({ ...item, variableKind: "Commands" })),
-  ];
-
-  if (state.activeVariableTab === "all") {
-    return allVariables;
-  }
-
-  return allVariables.filter((variable) => normalizeKindKey(variable.variableKind) === state.activeVariableTab);
-};
-
-const renderVariableTabs = () => {
-  elements.variableTabButtons.forEach((button) => {
-    button.classList.toggle("active", button.dataset.tab === state.activeVariableTab);
-  });
-};
-
-const renderParameters = () => {
-  const visibleVariables = getVisibleVariables();
-
-  if (!visibleVariables.length) {
+const renderParameters = (parameters) => {
+  if (!parameters.length) {
     elements.parameterTableBody.innerHTML = `<tr><td colspan="6" class="empty-state">No parameters returned.</td></tr>`;
     return;
   }
 
-  elements.parameterTableBody.innerHTML = visibleVariables.map((parameter) => `
-    <tr data-name="${parameter.name}" data-kind="${parameter.variableKind}">
-      <td><strong>${getDisplayLabel(parameter)}</strong></td>
+  elements.parameterTableBody.innerHTML = parameters.map((parameter) => `
+    <tr data-name="${parameter.name}">
+      <td><strong>${getParameterDisplayName(parameter)}</strong></td>
       <td class="value-cell">${parameter.value ?? ""}</td>
       <td>${parameter.dataType || "-"}</td>
       <td>${parameter.index ?? 0}</td>
@@ -311,12 +258,6 @@ const renderParameters = () => {
   `).join("");
 };
 
-const setVariableTab = (tabKey) => {
-  state.activeVariableTab = tabKey;
-  renderVariableTabs();
-  renderParameters();
-};
-
 const updateSessionLabels = () => {
   elements.masterIdLabel.textContent = state.masterId;
   elements.masterIdInput.value = state.masterId;
@@ -324,77 +265,59 @@ const updateSessionLabels = () => {
 };
 
 const buildDemoParameters = () => [
-  { name: "TN_V_SSP_SSC_SP1", displayName: "MDC - Measurement Value", value: "425", dataType: "UINT", index: 256, subindex: 1, minimum: "100", maximum: "1000", variableKind: "Standard Params" },
-  { name: "TN_V_RANGE", displayName: "Switching signal 1", value: "1", dataType: "BOOL", index: 257, subindex: 1, variableKind: "Standard Params" },
-  { name: "TN_V_LEVEL", displayName: "Switching signal 2", value: "0", dataType: "BOOL", index: 258, subindex: 1, variableKind: "Standard Params" },
-  { name: "TN_V_TEMP", displayName: "Vendor specific temp", value: "23.6", dataType: "FLOAT", index: 0x4001, subindex: 1, variableKind: "Specific" },
-  { name: "SP1", displayName: "Status word", value: "1", dataType: "BOOL", index: 260, subindex: 1, variableKind: "Other" },
+  { name: "DISTANCE_MDC", display_name: DISTANCE_MDC_LABEL, value: "425", dataType: "UINT", index: 256, subindex: 1 },
+  { name: "TN_V_RANGE", display_name: "Detection Range", value: "950", dataType: "UINT", index: 257, subindex: 1 },
+  { name: "TN_V_LEVEL", display_name: "Fluid Level", value: "72", dataType: "UINT", index: 258, subindex: 1 },
+  { name: "TN_V_TEMP", display_name: "Sensor Temperature", value: "23.6", dataType: "FLOAT", index: 259, subindex: 1 },
+  { name: "SP1", display_name: "Switching Signal 1", value: "1", dataType: "BOOL", index: 260, subindex: 1 },
+  { name: "SP2", display_name: "Switching Signal 2", value: "0", dataType: "BOOL", index: 260, subindex: 2 },
 ];
 
 const pickProcessParameter = (parameters) => {
-  const preferred = parameters.find((parameter) => /distance|range|level|actual|measure|output/i.test(parameter.displayName || parameter.name))
+  const preferred = parameters.find((parameter) => isDistanceMdcSignal(parameter))
+    || parameters.find((parameter) => {
+    const haystack = `${getParameterDisplayName(parameter)} ${parameter.name || ""}`;
+    return /distance|range|level|actual|measure|measurement|output/i.test(haystack);
+  })
     || parameters.find((parameter) => /int|uint|float|double/i.test(parameter.dataType))
     || parameters[0];
 
-  return preferred?.name || "TN_V_SSP_SSC_SP1";
+  return preferred?.name || "DISTANCE_MDC";
 };
 
-const updateFromParameterValue = ({ parameterName, parameterLabel, value, minimum, maximum }) => {
-  if (parameterName) {
-    state.processParameterName = parameterName;
-  }
-
-  if (parameterLabel) {
-    state.processParameterDisplay = parameterLabel;
-  } else if (parameterName) {
-    const selectedVariable = findVariableByName(parameterName);
-    state.processParameterDisplay = getDisplayLabel(selectedVariable, state.processParameterDisplay || "--");
-  }
-
+const updateFromParameterValue = (parameterName, value, label = "") => {
+  state.processParameter = parameterName || state.processParameter;
+  state.processParameterLabel = label || getParameterLabelFromName(parameterName) || state.processParameterLabel || DISTANCE_MDC_LABEL;
   state.currentValue = value ?? "--";
-  state.normalizedValue = normalizeWithBounds(state.currentValue, minimum, maximum);
-  updateDistanceBounds(minimum, maximum);
+  state.normalizedValue = normalizeValue(state.currentValue);
   updateVisualization(state.normalizedValue);
 };
 
-const applyProcessSnapshot = (snapshot) => {
-  const snapshotParameterName = snapshot.parameterName || state.processParameterName;
-  const selectedVariable = findVariableByName(snapshotParameterName);
-  const displayName = getDisplayName(snapshot)
-    || getDisplayName(selectedVariable)
-    || state.processParameterDisplay
-    || "--";
-  const value = snapshot.value ?? snapshot.rawValue;
-  const minimum = snapshot.minimum;
-  const maximum = snapshot.maximum;
-
-  if (/mdc\s*-\s*measurement value/i.test(displayName)) {
-    state.hasDistanceSignal = true;
-    updateFromParameterValue({
-      parameterName: snapshotParameterName,
-      parameterLabel: displayName,
-      value,
-      minimum,
-      maximum,
-    });
+const updateSwitchingSignal = (signalNumber, value) => {
+  if (!signalNumber || !(signalNumber in state.switchingSignals)) {
     return;
   }
 
-  if (/switching signal/i.test(displayName)) {
-    const signalId = snapshot.processDataIndex || `${snapshot.index || "x"}:${snapshot.subindex || "x"}`;
-    updateSwitchingSignal(displayName, value, signalId);
+  state.switchingSignals[signalNumber] = toBooleanSignal(value);
+  updateSwitchingIndicators();
+};
+
+const updateFromProcessSnapshot = (snapshot) => {
+  const signalNumber = getSwitchingSignalNumber(snapshot);
+  if (signalNumber) {
+    updateSwitchingSignal(signalNumber, snapshot.value ?? snapshot.rawValue);
     return;
   }
 
-  if (!state.hasDistanceSignal) {
-    updateFromParameterValue({
-      parameterName: snapshotParameterName,
-      parameterLabel: displayName,
-      value,
-      minimum,
-      maximum,
-    });
+  if (!isDistanceMdcSignal(snapshot)) {
+    return;
   }
+
+  updateFromParameterValue(
+    snapshot.parameterName || state.processParameter,
+    snapshot.rawValue ?? snapshot.value,
+    DISTANCE_MDC_LABEL,
+  );
 };
 
 const startDemoStream = () => {
@@ -406,22 +329,10 @@ const startDemoStream = () => {
     const phase = Date.now() / 1100;
     const distance = 0.5 + 0.5 * Math.sin(phase);
     const simulatedValue = Math.round(1000 * (1 - distance) + 120 * Math.random());
-    const switching = simulatedValue < 520 ? "1" : "0";
 
-    applyProcessSnapshot({
-      displayName: "MDC - Measurement Value",
-      value: String(simulatedValue),
-      minimum: "100",
-      maximum: "1000",
-    });
-    applyProcessSnapshot({
-      displayName: "SSC - Switching signal 1",
-      value: switching,
-    });
-    applyProcessSnapshot({
-      displayName: "SSC - Switching signal 2",
-      value: simulatedValue < 300 ? "1" : "0",
-    });
+    updateFromParameterValue(state.processParameter || "DISTANCE_MDC", String(simulatedValue), DISTANCE_MDC_LABEL);
+    updateSwitchingSignal(1, simulatedValue < 450);
+    updateSwitchingSignal(2, simulatedValue < 225);
 
     if (state.application === "object") {
       appendLog(`Live object distance ${simulatedValue}`);
@@ -449,7 +360,7 @@ const startLiveStream = () => {
     masterId: state.masterId,
     portNumber: String(state.portNumber),
     application: state.application,
-    ...(state.processParameterName ? { parameterName: state.processParameterName } : {}),
+    ...(state.processParameter ? { parameterName: state.processParameter } : {}),
   });
 
   const source = new EventSource(`${apiBaseUrl}/api/process/live?${query.toString()}`);
@@ -465,7 +376,7 @@ const startLiveStream = () => {
 
   source.addEventListener("process", (event) => {
     const snapshot = JSON.parse(event.data);
-    applyProcessSnapshot(snapshot);
+    updateFromProcessSnapshot(snapshot);
   });
 
   source.onerror = () => {
@@ -515,17 +426,11 @@ const loadSensor = async () => {
 
   if (!apiBaseUrl) {
     state.parameters = buildDemoParameters();
-    state.commands = [{ name: "CMD_Reset", displayName: "Reset Sensor", value: "", dataType: "COMMAND", index: 2, subindex: 0, variableKind: "Commands" }];
-    state.processParameterName = pickProcessParameter(state.parameters);
-    renderParameters();
-    const processVariable = findVariableByName(state.processParameterName) || state.parameters[0];
-    updateFromParameterValue({
-      parameterName: processVariable?.name,
-      parameterLabel: getDisplayLabel(processVariable),
-      value: processVariable?.value,
-      minimum: processVariable?.minimum,
-      maximum: processVariable?.maximum,
-    });
+    state.processParameter = pickProcessParameter(state.parameters);
+    renderParameters(state.parameters);
+    updateFromParameterValue(state.processParameter, state.parameters[0].value, DISTANCE_MDC_LABEL);
+    updateSwitchingSignal(1, state.parameters.find((parameter) => parameter.name === "SP1")?.value);
+    updateSwitchingSignal(2, state.parameters.find((parameter) => parameter.name === "SP2")?.value);
     setSensorState(true, "Demo ultrasonic sensor loaded");
     appendLog("Loaded demo ultrasonic sensor.");
     startLiveStream();
@@ -541,40 +446,24 @@ const loadSensor = async () => {
       }),
     });
 
-    state.parameters = (bootstrap.parameters || []).map((parameter) => ({
-      ...parameter,
-      variableKind: inferVariableKind(parameter),
-    }));
-    state.commands = (bootstrap.commands || []).map((command) => ({
-      ...command,
-      variableKind: "Commands",
-    }));
-    state.processParameterName = bootstrap.suggestedProcessParameter || pickProcessParameter(state.parameters);
-    renderParameters();
-    const processVariable = findVariableByName(state.processParameterName) || state.parameters[0];
-    updateFromParameterValue({
-      parameterName: processVariable?.name,
-      parameterLabel: getDisplayLabel(processVariable),
-      value: processVariable?.value ?? "--",
-      minimum: processVariable?.minimum,
-      maximum: processVariable?.maximum,
-    });
+    state.parameters = bootstrap.parameters || [];
+    state.processParameter = bootstrap.suggestedProcessParameter || pickProcessParameter(state.parameters);
+    renderParameters(state.parameters);
+    updateFromParameterValue(
+      state.processParameter,
+      getParameterByInternalName(state.processParameter)?.value ?? bootstrap.parameters?.[0]?.value ?? "--",
+      state.processParameterLabel,
+    );
     setSensorState(Boolean(bootstrap.sensorConnected ?? true), `Sensor loaded: ${bootstrap.productName || "Ultrasonic sensor"}`);
     appendLog(`Loaded sensor: ${bootstrap.productName || "Ultrasonic sensor"}`);
     startLiveStream();
   } catch (error) {
     state.parameters = buildDemoParameters();
-    state.commands = [{ name: "CMD_Reset", displayName: "Reset Sensor", value: "", dataType: "COMMAND", index: 2, subindex: 0, variableKind: "Commands" }];
-    state.processParameterName = pickProcessParameter(state.parameters);
-    renderParameters();
-    const processVariable = findVariableByName(state.processParameterName) || state.parameters[0];
-    updateFromParameterValue({
-      parameterName: processVariable?.name,
-      parameterLabel: getDisplayLabel(processVariable),
-      value: processVariable?.value,
-      minimum: processVariable?.minimum,
-      maximum: processVariable?.maximum,
-    });
+    state.processParameter = pickProcessParameter(state.parameters);
+    renderParameters(state.parameters);
+    updateFromParameterValue(state.processParameter, state.parameters[0].value, DISTANCE_MDC_LABEL);
+    updateSwitchingSignal(1, state.parameters.find((parameter) => parameter.name === "SP1")?.value);
+    updateSwitchingSignal(2, state.parameters.find((parameter) => parameter.name === "SP2")?.value);
     setSensorState(false, `Sensor load fallback: ${error.message}`);
     appendLog(`Sensor load failed, using demo data: ${error.message}`);
     startLiveStream();
@@ -590,18 +479,15 @@ const refreshParameters = async () => {
 
   if (!apiBaseUrl) {
     state.parameters = buildDemoParameters();
-    renderParameters();
+    renderParameters(state.parameters);
     appendLog(`Demo parameters refreshed: ${state.parameters.length} items`);
     return;
   }
 
   try {
     const parameters = await fetchJson(`${apiBaseUrl}/api/parameters?portNumber=${state.portNumber}`);
-    state.parameters = (parameters || []).map((parameter) => ({
-      ...parameter,
-      variableKind: inferVariableKind(parameter),
-    }));
-    renderParameters();
+    state.parameters = parameters;
+    renderParameters(parameters);
     appendLog(`Parameters refreshed: ${parameters.length} items`);
   } catch (error) {
     appendLog(`Parameter refresh failed: ${error.message}`);
@@ -615,21 +501,16 @@ elements.refreshParamsBtn.addEventListener("click", refreshParameters);
 elements.writeForm.addEventListener("submit", async (event) => {
   event.preventDefault();
 
-  const parameterInput = elements.writeName.value.trim();
+  const parameterNameInput = elements.writeName.value.trim();
   const value = elements.writeValue.value.trim();
-  const selectedVariable = findVariableByInput(parameterInput);
-  const parameterName = selectedVariable?.name || "";
-  const parameterLabel = getDisplayLabel(selectedVariable, parameterInput);
 
-  if (!parameterInput || !value) {
-    appendLog("Provide a parameter display name and value before writing.");
+  if (!parameterNameInput || !value) {
+    appendLog("Provide a parameter name and value before writing.");
     return;
   }
 
-  if (!parameterName) {
-    appendLog(`Unknown parameter: ${parameterInput}. Use a valid DisplayName from the table.`);
-    return;
-  }
+  const parameterName = resolveParameterName(parameterNameInput);
+  const parameterLabel = getParameterLabelFromName(parameterName);
 
   const apiBaseUrl = getApiBaseUrl();
 
@@ -639,7 +520,7 @@ elements.writeForm.addEventListener("submit", async (event) => {
       row.querySelector(".value-cell").textContent = value;
     }
 
-    updateFromParameterValue({ parameterName, parameterLabel, value });
+    updateFromParameterValue(parameterName, value);
     appendLog(`Demo write ${parameterLabel} = ${value}`);
     elements.writeValue.value = "";
     return;
@@ -673,23 +554,15 @@ document.querySelectorAll(".tab-btn").forEach((button) => {
   button.addEventListener("click", () => setApplication(button.dataset.application));
 });
 
-elements.variableTabButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    setVariableTab(button.dataset.tab || "all");
-  });
-});
-
 const initialize = () => {
   state.masterId = elements.masterIdInput.value.trim() || "master-01";
   state.portNumber = Number(elements.portNumberInput.value || 0);
   updateSessionLabels();
   setCloudState(false, savedBaseUrl ? "Cloud bridge waiting" : "Cloud bridge waiting");
   setSensorState(false, "Sensor not loaded");
-  updateDistanceBounds(null, null);
-  state.switchingSignals = {};
-  renderSwitchingSignals();
-  setVariableTab("all");
+  renderParameters([]);
   setApplication("object");
+  updateSwitchingIndicators();
   appendLog("UI initialized.");
   startLiveStream();
 };

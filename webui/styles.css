@@ -417,6 +417,7 @@ button {
   font-family: "IBM Plex Mono", monospace;
   font-size: 0.75rem;
   color: var(--muted);
+  width: fit-content;
 }
 
 .switching-signals {
@@ -425,6 +426,7 @@ button {
   top: 214px;
   display: grid;
   gap: 8px;
+  z-index: 1;
 }
 
 .switching-empty {
@@ -633,8 +635,7 @@ thead th {
 
 @media (max-width: 1180px) {
   .hero-card,
-  .layout-grid,
-  .workflow {
+  .layout-grid {
     grid-template-columns: 1fr;
   }
 

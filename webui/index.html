@@ -54,7 +54,7 @@
           </div>
           <div>
             <span class="meta-label">Process parameter</span>
-            <strong id="processParameterLabel">--</strong>
+            <strong id="processParameterLabel">Distance MDC</strong>
           </div>
           <div>
             <span class="meta-label">Current value</span>
@@ -69,15 +69,26 @@
         <div class="scene-stage">
           <div class="scene object-scene active" id="objectScene">
             <div class="sensor-head"></div>
+            <div class="sensor-body">
+              <span>Ultrasonic sensor</span>
+              <small>Distance decreases as the object moves closer.</small>
+            </div>
             <div class="beam"></div>
             <div class="track"></div>
             <div class="target-object" id="targetObject"></div>
-            <div class="switching-signals" id="switchingSignals">
-              <span class="switching-empty">No switching signal yet</span>
-            </div>
             <div class="distance-ruler">
-              <span id="nearDistanceLabel">Near</span>
-              <span id="farDistanceLabel">Far</span>
+              <span>Far</span>
+              <span>Near</span>
+            </div>
+            <div class="switching-signals" aria-label="Switching signals">
+              <div class="switching-indicator">
+                <span class="switching-led" id="switchingSignal1Led" aria-hidden="true"></span>
+                <span id="switchingSignal1Label">Switching Signal 1: OFF</span>
+              </div>
+              <div class="switching-indicator">
+                <span class="switching-led" id="switchingSignal2Led" aria-hidden="true"></span>
+                <span id="switchingSignal2Label">Switching Signal 2: OFF</span>
+              </div>
             </div>
           </div>
 
@@ -134,8 +145,8 @@
 
         <form id="writeForm" class="parameter-form">
           <label>
-            Parameter display name
-            <input id="writeName" type="text" placeholder="Enter a DisplayName from the table" />
+            Parameter name
+            <input id="writeName" type="text" placeholder="Select a parameter below" />
           </label>
           <label>
             Value
@@ -160,19 +171,11 @@
       <div class="section-head">
         <div>
           <p class="eyebrow">GetAllParams</p>
-          <h2 id="parameterTableTitle">Editable sensor parameters</h2>
+          <h2>Editable sensor parameters</h2>
         </div>
         <div class="parameter-actions">
           <button id="refreshParamsBtn" class="secondary-btn">Refresh Parameters</button>
         </div>
-      </div>
-
-      <div class="variable-tabs">
-        <button class="variable-tab-btn active" data-tab="all">All</button>
-        <button class="variable-tab-btn" data-tab="specific">Specific</button>
-        <button class="variable-tab-btn" data-tab="standard">Standard Params</button>
-        <button class="variable-tab-btn" data-tab="commands">Commands</button>
-        <button class="variable-tab-btn" data-tab="other">Other</button>
       </div>
 
       <div class="table-wrap">
