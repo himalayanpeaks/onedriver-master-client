@@ -13,6 +13,7 @@ const state = {
     2: false,
   },
   parameters: [],
+  activeParameterKind: "All",
   liveSource: null,
   demoTimer: null,
   useDemoMode: true,
@@ -45,6 +46,7 @@ const elements = {
   farDistanceLabel: document.getElementById("farDistanceLabel"),
   objectScene: document.getElementById("objectScene"),
   fluidScene: document.getElementById("fluidScene"),
+  parameterKindTabs: document.getElementById("parameterKindTabs"),
   parameterTableBody: document.getElementById("parameterTableBody"),
   writeForm: document.getElementById("writeForm"),
   writeName: document.getElementById("writeName"),
@@ -68,6 +70,15 @@ const appendLog = (message) => {
 const getApiBaseUrl = () => elements.apiBaseUrl.value.trim().replace(/\/$/, "");
 
 const DISTANCE_MDC_LABEL = "Distance MDC";
+const DEFAULT_PARAMETER_KIND = "All";
+const PARAMETER_KIND_ORDER = [
+  "Process Data",
+  "Standard Params",
+  "System",
+  "Specific",
+  "Commands",
+  "Other",
+];
 
 const parseFiniteNumber = (value) => {
   const numeric = Number.parseFloat(value);
@@ -270,13 +281,90 @@ const fetchJson = async (url, options = {}) => {
   return response.json();
 };
 
+const normalizeVariableKind = (parameter) => {
+  const rawKind = String(parameter?.variableKind || "").trim();
+  if (!rawKind) {
+    return "Other";
+  }
+
+  return rawKind;
+};
+
+const getParameterKinds = (parameters) => {
+  const kinds = new Set([DEFAULT_PARAMETER_KIND]);
+  parameters.forEach((parameter) => kinds.add(normalizeVariableKind(parameter)));
+
+  return [...kinds].sort((left, right) => {
+    if (left === DEFAULT_PARAMETER_KIND) {
+      return -1;
+    }
+
+    if (right === DEFAULT_PARAMETER_KIND) {
+      return 1;
+    }
+
+    const leftIndex = PARAMETER_KIND_ORDER.indexOf(left);
+    const rightIndex = PARAMETER_KIND_ORDER.indexOf(right);
+    if (leftIndex >= 0 && rightIndex >= 0) {
+      return leftIndex - rightIndex;
+    }
+
+    if (leftIndex >= 0) {
+      return -1;
+    }
+
+    if (rightIndex >= 0) {
+      return 1;
+    }
+
+    return left.localeCompare(right);
+  });
+};
+
+const renderParameterKindTabs = (kinds) => {
+  if (!elements.parameterKindTabs) {
+    return;
+  }
+
+  elements.parameterKindTabs.innerHTML = kinds.map((kind) => `
+    <button
+      class="variable-tab-btn${state.activeParameterKind === kind ? " active" : ""}"
+      data-kind="${kind}"
+      type="button"
+    >
+      ${kind}
+    </button>
+  `).join("");
+};
+
+const getVisibleParameters = (parameters) => {
+  if (state.activeParameterKind === DEFAULT_PARAMETER_KIND) {
+    return parameters;
+  }
+
+  return parameters.filter((parameter) => normalizeVariableKind(parameter) === state.activeParameterKind);
+};
+
 const renderParameters = (parameters) => {
+  const kinds = getParameterKinds(parameters);
+  if (!kinds.includes(state.activeParameterKind)) {
+    state.activeParameterKind = DEFAULT_PARAMETER_KIND;
+  }
+
+  renderParameterKindTabs(kinds);
+  const visibleParameters = getVisibleParameters(parameters);
+
   if (!parameters.length) {
     elements.parameterTableBody.innerHTML = `<tr><td colspan="6" class="empty-state">No parameters returned.</td></tr>`;
     return;
   }
 
-  elements.parameterTableBody.innerHTML = parameters.map((parameter) => `
+  if (!visibleParameters.length) {
+    elements.parameterTableBody.innerHTML = `<tr><td colspan="6" class="empty-state">No parameters available in ${state.activeParameterKind}.</td></tr>`;
+    return;
+  }
+
+  elements.parameterTableBody.innerHTML = visibleParameters.map((parameter) => `
     <tr data-name="${parameter.name}">
       <td><strong>${getParameterDisplayName(parameter)}</strong></td>
       <td class="value-cell">${parameter.value ?? ""}</td>
@@ -300,12 +388,12 @@ const updateSessionLabels = () => {
 };
 
 const buildDemoParameters = () => [
-  { name: "DISTANCE_MDC", display_name: DISTANCE_MDC_LABEL, value: "425", dataType: "UINT", index: 256, subindex: 1 },
-  { name: "TN_V_RANGE", display_name: "Detection Range", value: "950", dataType: "UINT", index: 257, subindex: 1 },
-  { name: "TN_V_LEVEL", display_name: "Fluid Level", value: "72", dataType: "UINT", index: 258, subindex: 1 },
-  { name: "TN_V_TEMP", display_name: "Sensor Temperature", value: "23.6", dataType: "FLOAT", index: 259, subindex: 1 },
-  { name: "SP1", display_name: "Switching Signal 1", value: "1", dataType: "BOOL", index: 260, subindex: 1 },
-  { name: "SP2", display_name: "Switching Signal 2", value: "0", dataType: "BOOL", index: 260, subindex: 2 },
+  { name: "DISTANCE_MDC", display_name: DISTANCE_MDC_LABEL, value: "425", dataType: "UINT", index: 256, subindex: 1, variableKind: "Process Data" },
+  { name: "TN_V_RANGE", display_name: "Detection Range", value: "950", dataType: "UINT", index: 257, subindex: 1, variableKind: "Standard Params" },
+  { name: "TN_V_LEVEL", display_name: "Fluid Level", value: "72", dataType: "UINT", index: 258, subindex: 1, variableKind: "Standard Params" },
+  { name: "TN_V_TEMP", display_name: "Sensor Temperature", value: "23.6", dataType: "FLOAT", index: 259, subindex: 1, variableKind: "Standard Params" },
+  { name: "SP1", display_name: "Switching Signal 1", value: "1", dataType: "BOOL", index: 260, subindex: 1, variableKind: "Process Data" },
+  { name: "SP2", display_name: "Switching Signal 2", value: "0", dataType: "BOOL", index: 260, subindex: 2, variableKind: "Process Data" },
 ];
 
 const pickProcessParameter = (parameters) => {
@@ -553,6 +641,20 @@ const refreshParameters = async () => {
 elements.connectBtn.addEventListener("click", connectCloud);
 elements.loadSensorBtn.addEventListener("click", loadSensor);
 elements.refreshParamsBtn.addEventListener("click", refreshParameters);
+elements.parameterKindTabs?.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-kind]");
+  if (!button) {
+    return;
+  }
+
+  const selectedKind = button.dataset.kind || DEFAULT_PARAMETER_KIND;
+  if (state.activeParameterKind === selectedKind) {
+    return;
+  }
+
+  state.activeParameterKind = selectedKind;
+  renderParameters(state.parameters);
+});
 
 elements.writeForm.addEventListener("submit", async (event) => {
   event.preventDefault();

@@ -174,6 +174,53 @@ function inferVariableKind(variable, sourceKind = 'parameter') {
   return 'Other';
 }
 
+function mapKnownVariableKind(kind) {
+  const normalized = String(kind || '').trim().toLowerCase();
+  if (!normalized) {
+    return '';
+  }
+
+  if (/^system/.test(normalized)) {
+    return 'System';
+  }
+
+  if (/^specific|vendor|application/.test(normalized)) {
+    return 'Specific';
+  }
+
+  if (/^standard|std/.test(normalized)) {
+    return 'Standard Params';
+  }
+
+  if (/^process/.test(normalized)) {
+    return 'Process Data';
+  }
+
+  if (/^command/.test(normalized)) {
+    return 'Commands';
+  }
+
+  return String(kind).trim();
+}
+
+function resolveVariableKind(descriptorVariable, parameter, sourceKind = 'parameter') {
+  if (sourceKind === 'command') {
+    return 'Commands';
+  }
+
+  const descriptorKind = mapKnownVariableKind(descriptorVariable?.variableKind);
+  if (descriptorKind) {
+    return descriptorKind;
+  }
+
+  const parameterKind = mapKnownVariableKind(parameter?.variableKind);
+  if (parameterKind) {
+    return parameterKind;
+  }
+
+  return inferVariableKind(descriptorVariable || parameter, sourceKind);
+}
+
 function processSignalScore(parameter) {
   const label = `${parameter?.displayName || ''} ${parameter?.name || ''}`.toLowerCase();
   let score = 0;
@@ -238,7 +285,7 @@ function enrichParameterWithDescriptor(parameter, descriptorByName) {
     dataType: descriptorVariable?.dataType || parameter.dataType,
     minimum: descriptorVariable?.minimum || parameter.minimum,
     maximum: descriptorVariable?.maximum || parameter.maximum,
-    variableKind: inferVariableKind(descriptorVariable || parameter, 'parameter'),
+    variableKind: resolveVariableKind(descriptorVariable, parameter, 'parameter'),
   };
 }
 
@@ -329,7 +376,7 @@ const server = http.createServer(async (req, res) => {
 
       const commands = (descriptor.commands || []).map((command) => ({
         ...mapVariable(command, command?.name || ''),
-        variableKind: inferVariableKind(command, 'command'),
+        variableKind: resolveVariableKind(command, command, 'command'),
       }));
       const suggested = pickProcessParameter(enrichedParameters);
 
