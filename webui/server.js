@@ -486,8 +486,8 @@ const server = http.createServer(async (req, res) => {
               rawValue,
               value: rawValue,
               normalizedValue: normalizeForAnimation(rawValue),
-              minimum: '',
-              maximum: '',
+              minimum: read.variable?.minimum || '',
+              maximum: read.variable?.maximum || '',
               mode: 'polling',
               timestamp: new Date().toISOString(),
             };

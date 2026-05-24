@@ -6,6 +6,8 @@ const state = {
   processParameterLabel: "Distance MDC",
   currentValue: "--",
   normalizedValue: 0,
+  processMinimum: null,
+  processMaximum: null,
   switchingSignals: {
     1: false,
     2: false,
@@ -39,6 +41,8 @@ const elements = {
   portNumberInput: document.getElementById("portNumberInput"),
   targetObject: document.getElementById("targetObject"),
   tankFill: document.getElementById("tankFill"),
+  nearDistanceLabel: document.getElementById("nearDistanceLabel"),
+  farDistanceLabel: document.getElementById("farDistanceLabel"),
   objectScene: document.getElementById("objectScene"),
   fluidScene: document.getElementById("fluidScene"),
   parameterTableBody: document.getElementById("parameterTableBody"),
@@ -64,6 +68,11 @@ const appendLog = (message) => {
 const getApiBaseUrl = () => elements.apiBaseUrl.value.trim().replace(/\/$/, "");
 
 const DISTANCE_MDC_LABEL = "Distance MDC";
+
+const parseFiniteNumber = (value) => {
+  const numeric = Number.parseFloat(value);
+  return Number.isFinite(numeric) ? numeric : null;
+};
 
 const getSignalHaystack = (candidate) => String([
   candidate?.displayName,
@@ -165,6 +174,12 @@ const normalizeValue = (value) => {
     return Math.max(0, Math.min(1, (String(value).length % 25) / 24));
   }
 
+  const min = parseFiniteNumber(state.processMinimum);
+  const max = parseFiniteNumber(state.processMaximum);
+  if (min !== null && max !== null && max > min) {
+    return Math.max(0, Math.min(1, (numeric - min) / (max - min)));
+  }
+
   if (numeric <= 1) {
     return Math.max(0, Math.min(1, numeric));
   }
@@ -178,6 +193,25 @@ const normalizeValue = (value) => {
   }
 
   return Math.max(0, Math.min(1, numeric / 10000));
+};
+
+const formatRangeValue = (value) => {
+  const numeric = parseFiniteNumber(value);
+  if (numeric === null) {
+    return "--";
+  }
+
+  return Number.isInteger(numeric) ? String(numeric) : numeric.toFixed(2);
+};
+
+const updateDistanceRangeLabels = () => {
+  if (elements.nearDistanceLabel) {
+    elements.nearDistanceLabel.textContent = `Near ${formatRangeValue(state.processMinimum)}`;
+  }
+
+  if (elements.farDistanceLabel) {
+    elements.farDistanceLabel.textContent = `Far ${formatRangeValue(state.processMaximum)}`;
+  }
 };
 
 const updateSwitchingIndicators = () => {
@@ -199,6 +233,7 @@ const updateVisualization = (normalizedValue) => {
   elements.tankFill.style.setProperty("--fill-height", `${fillHeight}%`);
   elements.currentValueLabel.textContent = state.currentValue;
   elements.processParameterLabel.textContent = state.processParameterLabel || getParameterLabelFromName(state.processParameter);
+  updateDistanceRangeLabels();
   updateSwitchingIndicators();
 };
 
@@ -293,6 +328,25 @@ const updateFromParameterValue = (parameterName, value, label = "") => {
   updateVisualization(state.normalizedValue);
 };
 
+const updateProcessRange = (minimum, maximum) => {
+  const parsedMinimum = parseFiniteNumber(minimum);
+  const parsedMaximum = parseFiniteNumber(maximum);
+
+  if (parsedMinimum !== null && parsedMaximum !== null && parsedMaximum > parsedMinimum) {
+    state.processMinimum = parsedMinimum;
+    state.processMaximum = parsedMaximum;
+    return;
+  }
+
+  if (parsedMinimum !== null) {
+    state.processMinimum = parsedMinimum;
+  }
+
+  if (parsedMaximum !== null) {
+    state.processMaximum = parsedMaximum;
+  }
+};
+
 const updateSwitchingSignal = (signalNumber, value) => {
   if (!signalNumber || !(signalNumber in state.switchingSignals)) {
     return;
@@ -303,6 +357,8 @@ const updateSwitchingSignal = (signalNumber, value) => {
 };
 
 const updateFromProcessSnapshot = (snapshot) => {
+  updateProcessRange(snapshot.minimum, snapshot.maximum);
+
   const signalNumber = getSwitchingSignalNumber(snapshot);
   if (signalNumber) {
     updateSwitchingSignal(signalNumber, snapshot.value ?? snapshot.rawValue);
@@ -562,6 +618,7 @@ const initialize = () => {
   setSensorState(false, "Sensor not loaded");
   renderParameters([]);
   setApplication("object");
+  updateDistanceRangeLabels();
   updateSwitchingIndicators();
   appendLog("UI initialized.");
   startLiveStream();
