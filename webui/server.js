@@ -329,14 +329,38 @@ function pickProcessParameter(parameters) {
   return preferred?.name || '';
 }
 
+function getDescriptorCollection(source, ...keys) {
+  for (const key of keys) {
+    const value = source?.[key];
+    if (Array.isArray(value) && value.length > 0) {
+      return value;
+    }
+  }
+
+  return [];
+}
+
+function getDescriptorProcessCandidates(descriptor) {
+  const variables = descriptor?.variables || {};
+
+  return [
+    ...getDescriptorCollection(variables, 'pdInCollection', 'pdinCollection', 'pdincollection', 'pdIn', 'pdin'),
+    ...getDescriptorCollection(descriptor, 'pdInCollection', 'pdinCollection', 'pdincollection', 'pdIn', 'pdin'),
+  ];
+}
+
+function pickDescriptorProcessParameter(descriptor) {
+  return pickProcessParameter(getDescriptorProcessCandidates(descriptor));
+}
+
 async function getDescriptorByName(masterId) {
   const descriptor = await callGrpc('GetDescriptor', { masterId });
   const descriptorParameters = [
-    ...(descriptor.parameters || []),
-    ...(descriptor.commands || []),
-    ...(descriptor.events || descriptor.eventsCollection || []),
-    ...(descriptor.pdIn || descriptor.pdin || descriptor.pdInCollection || descriptor.pdinCollection || []),
-    ...(descriptor.pdOut || descriptor.pdout || descriptor.pdOutCollection || descriptor.pdoutCollection || []),
+    ...getDescriptorCollection(descriptor.variables || descriptor, 'parameters'),
+    ...getDescriptorCollection(descriptor.variables || descriptor, 'commands'),
+    ...getDescriptorCollection(descriptor.variables || descriptor, 'events', 'eventsCollection'),
+    ...getDescriptorCollection(descriptor.variables || descriptor, 'pdIn', 'pdin', 'pdInCollection', 'pdinCollection', 'pdincollection'),
+    ...getDescriptorCollection(descriptor.variables || descriptor, 'pdOut', 'pdout', 'pdOutCollection', 'pdoutCollection'),
   ];
   const descriptorByName = new Map(descriptorParameters.map((variable) => [variable?.name || '', variable]));
 
@@ -616,11 +640,13 @@ const server = http.createServer(async (req, res) => {
       const masterId = requestUrl.searchParams.get('masterId') || defaultMasterId;
       const portNumber = Number(requestUrl.searchParams.get('portNumber') || defaultPortNumber);
       const application = requestUrl.searchParams.get('application') || 'object';
+      let descriptor = null;
+      let descriptorByName = null;
 
       let parameterName = requestUrl.searchParams.get('parameterName');
       if (!parameterName) {
-        const parameters = await getAllParameterValues(masterId, portNumber);
-        parameterName = pickProcessParameter(parameters);
+        ({ descriptor, descriptorByName } = await getDescriptorByName(masterId));
+        parameterName = pickDescriptorProcessParameter(descriptor) || pickProcessParameter([...descriptorByName.values()]);
       }
 
       if (!parameterName) {
@@ -662,7 +688,7 @@ const server = http.createServer(async (req, res) => {
         }
 
         res.write('event: warning\n');
-        res.write(`data: ${JSON.stringify({ message: 'Falling back to polling mode.' })}\n\n`);
+        res.write(`data: ${JSON.stringify({ message: 'Falling back to descriptor-backed polling mode.' })}\n\n`);
 
         let pollInFlight = false;
 
@@ -673,27 +699,22 @@ const server = http.createServer(async (req, res) => {
 
           pollInFlight = true;
           try {
-            const read = await callGrpc('ReadParameter', {
-              masterId,
-              parameterName,
-              portNumber,
-            }, {
-              timeoutMs: Math.max(grpcCallTimeoutMs, 6000),
-              retries: 1,
-            });
-
-            const rawValue = read.variable?.value || '';
+            ({ descriptor, descriptorByName } = await getDescriptorByName(masterId));
+            const processParameter = descriptorByName.get(parameterName)
+              || descriptorByName.get(pickDescriptorProcessParameter(descriptor))
+              || null;
+            const rawValue = processParameter?.value || '';
             const payload = {
               masterId,
               application,
-              parameterName,
-              displayName: parameterName,
+              parameterName: processParameter?.name || parameterName,
+              displayName: processParameter?.displayName || processParameter?.name || parameterName,
               rawValue,
               value: rawValue,
               normalizedValue: normalizeForAnimation(rawValue),
-              minimum: read.variable?.minimum || '',
-              maximum: read.variable?.maximum || '',
-              mode: 'polling',
+              minimum: processParameter?.minimum || '',
+              maximum: processParameter?.maximum || '',
+              mode: 'descriptor-polling',
               timestamp: new Date().toISOString(),
             };
 
@@ -780,8 +801,9 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(webPort, () => {
+server.listen(webPort, '0.0.0.0', () => {
   console.log(`OneDriver WebUI running at http://localhost:${webPort}`);
+  console.log(`OneDriver WebUI listening on 0.0.0.0:${webPort}`);
   console.log(`gRPC adapter target: ${grpcTarget}`);
   console.log(`Proto file: ${protoPath}`);
 });
