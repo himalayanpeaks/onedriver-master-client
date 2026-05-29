@@ -146,13 +146,18 @@
         <form id="writeForm" class="parameter-form">
           <label>
             Parameter name
-            <input id="writeName" type="text" placeholder="Select a parameter below" />
+            <select id="writeName" aria-label="Parameter name">
+              <option value="">Select a parameter below</option>
+            </select>
           </label>
           <label>
             Value
             <input id="writeValue" type="text" placeholder="100" />
           </label>
-          <button class="primary-btn full-width" type="submit">Write Parameter</button>
+          <div class="parameter-form-actions">
+            <button id="readParameterBtn" class="secondary-btn full-width" type="button">Read Parameter</button>
+            <button class="primary-btn full-width" type="submit">Write Parameter</button>
+          </div>
         </form>
 
         <div class="log-panel">

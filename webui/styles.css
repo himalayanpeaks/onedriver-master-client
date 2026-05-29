@@ -532,7 +532,8 @@ button {
 }
 
 .config-card input,
-.parameter-form input {
+.parameter-form input,
+.parameter-form select {
   width: 100%;
   padding: 0.85rem 0.95rem;
   border-radius: 14px;
@@ -543,9 +544,16 @@ button {
 }
 
 .config-card input:focus,
-.parameter-form input:focus {
+.parameter-form input:focus,
+.parameter-form select:focus {
   border-color: rgba(109, 227, 209, 0.55);
   box-shadow: 0 0 0 4px rgba(109, 227, 209, 0.12);
+}
+
+.parameter-form-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .full-width {
@@ -628,6 +636,11 @@ thead th {
   color: var(--text);
 }
 
+.value-empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
 .empty-state {
   text-align: center;
   padding: 22px 12px;
@@ -679,5 +692,9 @@ thead th {
 
   .tank-shell {
     width: 82%;
+  }
+
+  .parameter-form-actions {
+    grid-template-columns: 1fr;
   }
 }

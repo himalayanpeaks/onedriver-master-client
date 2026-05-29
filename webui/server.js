@@ -6,7 +6,7 @@ const protoLoader = require('@grpc/proto-loader');
 
 const rootDir = __dirname;
 const webPort = Number(process.env.PORT || 8000);
-const grpcTarget = process.env.GRPC_TARGET || 'localhost:5176';
+const grpcTarget = process.env.GRPC_TARGET || '127.0.0.1:5176';
 const defaultMasterId = process.env.MASTER_ID || 'master-01';
 const defaultPortNumber = Number(process.env.SENSOR_PORT || 0);
 const protoPath = process.env.PROTO_PATH
@@ -36,17 +36,70 @@ const packageDefinition = protoLoader.loadSync(protoPath, {
 const proto = grpc.loadPackageDefinition(packageDefinition).iolink_master;
 const grpcClient = new proto.IoLinkMasterService(grpcTarget, grpc.credentials.createInsecure());
 
-function callGrpc(methodName, request) {
+const grpcCallTimeoutMs = Number(process.env.GRPC_CALL_TIMEOUT_MS || 12000);
+const grpcReadyTimeoutMs = Number(process.env.GRPC_READY_TIMEOUT_MS || 2000);
+const grpcRetryCount = Math.max(1, Number(process.env.GRPC_RETRY_COUNT || 1));
+const retryableGrpcCodes = new Set([
+  grpc.status.UNAVAILABLE,
+  grpc.status.DEADLINE_EXCEEDED,
+  grpc.status.RESOURCE_EXHAUSTED,
+  grpc.status.INTERNAL,
+]);
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForGrpcReady(timeoutMs = grpcReadyTimeoutMs) {
   return new Promise((resolve, reject) => {
-    grpcClient[methodName](request, (error, response) => {
+    grpcClient.waitForReady(Date.now() + timeoutMs, (error) => {
       if (error) {
         reject(error);
         return;
       }
 
-      resolve(response);
+      resolve();
     });
   });
+}
+
+async function callGrpc(methodName, request, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || grpcCallTimeoutMs);
+  const retries = Math.max(1, Number(options.retries || grpcRetryCount));
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= retries; attempt += 1) {
+    try {
+      // Unary calls get explicit deadlines to prevent hanging requests.
+      const response = await new Promise((resolve, reject) => {
+        grpcClient[methodName](
+          request,
+          new grpc.Metadata(),
+          { deadline: Date.now() + timeoutMs },
+          (error, value) => {
+            if (error) {
+              reject(error);
+              return;
+            }
+
+            resolve(value);
+          },
+        );
+      });
+
+      return response;
+    } catch (error) {
+      lastError = error;
+      const shouldRetry = retryableGrpcCodes.has(error?.code) && attempt < retries;
+      if (!shouldRetry) {
+        break;
+      }
+
+      await sleep(150 * attempt);
+    }
+  }
+
+  throw lastError || new Error(`gRPC call failed for ${methodName}`);
 }
 
 function readJsonBody(req) {
@@ -200,6 +253,18 @@ function mapKnownVariableKind(kind) {
     return 'Commands';
   }
 
+  if (/^event/.test(normalized)) {
+    return 'Events';
+  }
+
+  if (/^pd\s*in|^pdin|process\s*data\s*in|process\s*input/.test(normalized)) {
+    return 'PdIn';
+  }
+
+  if (/^pd\s*out|^pdout|process\s*data\s*out|process\s*output/.test(normalized)) {
+    return 'PdOut';
+  }
+
   return String(kind).trim();
 }
 
@@ -266,7 +331,13 @@ function pickProcessParameter(parameters) {
 
 async function getDescriptorByName(masterId) {
   const descriptor = await callGrpc('GetDescriptor', { masterId });
-  const descriptorParameters = descriptor.parameters || [];
+  const descriptorParameters = [
+    ...(descriptor.parameters || []),
+    ...(descriptor.commands || []),
+    ...(descriptor.events || descriptor.eventsCollection || []),
+    ...(descriptor.pdIn || descriptor.pdin || descriptor.pdInCollection || descriptor.pdinCollection || []),
+    ...(descriptor.pdOut || descriptor.pdout || descriptor.pdOutCollection || descriptor.pdoutCollection || []),
+  ];
   const descriptorByName = new Map(descriptorParameters.map((variable) => [variable?.name || '', variable]));
 
   return {
@@ -295,26 +366,60 @@ async function getEnrichedParameterValues(masterId, portNumber) {
     getDescriptorByName(masterId),
   ]);
 
-  return parameters.map((parameter) => enrichParameterWithDescriptor(parameter, descriptorByName));
+  const valuesByName = new Map();
+  parameters.forEach((parameter) => {
+    if (!parameter?.name) {
+      return;
+    }
+
+    valuesByName.set(parameter.name, parameter);
+  });
+
+  const merged = [];
+  descriptorByName.forEach((descriptorVariable, name) => {
+    if (!name) {
+      return;
+    }
+
+    const liveValue = valuesByName.get(name);
+    const mappedBase = liveValue || mapVariable(descriptorVariable, name);
+    merged.push(enrichParameterWithDescriptor(mappedBase, descriptorByName));
+    valuesByName.delete(name);
+  });
+
+  valuesByName.forEach((leftover) => {
+    merged.push(enrichParameterWithDescriptor(leftover, descriptorByName));
+  });
+
+  return merged;
 }
 
 async function getAllParameterValues(masterId, portNumber) {
   const all = await callGrpc('GetAllParameters', { masterId, portNumber });
   const names = all.parameterNames || [];
   const values = [];
+  const batchSize = 8;
 
-  for (const name of names) {
-    try {
-      const read = await callGrpc('ReadParameter', {
-        masterId,
-        parameterName: name,
-        portNumber,
-      });
+  for (let i = 0; i < names.length; i += batchSize) {
+    const batch = names.slice(i, i + batchSize);
+    const batchValues = await Promise.all(batch.map(async (name) => {
+      try {
+        const read = await callGrpc('ReadParameter', {
+          masterId,
+          parameterName: name,
+          portNumber,
+        }, {
+          timeoutMs: Math.max(grpcCallTimeoutMs, 15000),
+          retries: 1,
+        });
 
-      values.push(mapVariable(read.variable, name));
-    } catch (_) {
-      values.push(mapVariable(null, name));
-    }
+        return mapVariable(read.variable, name);
+      } catch (_) {
+        return mapVariable(null, name);
+      }
+    }));
+
+    values.push(...batchValues);
   }
 
   return values;
@@ -356,10 +461,24 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (req.method === 'GET' && pathname === '/api/session') {
+      let cloudConfigured = false;
+      let cloudMessage = '';
+
+      try {
+        await waitForGrpcReady();
+        await callGrpc('GetDescriptor', { masterId: defaultMasterId }, { retries: 1 });
+        cloudConfigured = true;
+        cloudMessage = 'Cloud bridge ready';
+      } catch (err) {
+        cloudConfigured = false;
+        cloudMessage = `gRPC backend unavailable: ${err.message}`;
+      }
+
       sendJson(res, 200, {
         masterId: defaultMasterId,
         defaultPortNumber,
-        cloudConfigured: true,
+        cloudConfigured,
+        cloudMessage,
         backendType: 'grpc-adapter',
         grpcTarget,
       });
@@ -371,23 +490,31 @@ const server = http.createServer(async (req, res) => {
       const masterId = body.masterId || defaultMasterId;
       const portNumber = Number.isFinite(body.portNumber) ? Number(body.portNumber) : defaultPortNumber;
 
-      const { descriptor } = await getDescriptorByName(masterId);
-      const enrichedParameters = await getEnrichedParameterValues(masterId, portNumber);
+      // Load metadata from descriptor only — no device reads at bootstrap time.
+      // Values are empty; users click Read on individual rows to fetch live values.
+      const { descriptor, descriptorByName } = await getDescriptorByName(masterId);
+
+      const parameters = [];
+      descriptorByName.forEach((descriptorVariable, name) => {
+        if (!name) return;
+        const mapped = mapVariable(descriptorVariable, name);
+        parameters.push(enrichParameterWithDescriptor(mapped, descriptorByName));
+      });
 
       const commands = (descriptor.commands || []).map((command) => ({
         ...mapVariable(command, command?.name || ''),
         variableKind: resolveVariableKind(command, command, 'command'),
       }));
-      const suggested = pickProcessParameter(enrichedParameters);
+      const suggested = pickProcessParameter(parameters);
 
       sendJson(res, 200, {
         masterId,
-        sensorConnected: enrichedParameters.length > 0,
+        sensorConnected: parameters.length > 0,
         productName: 'UB6000-F42-2EP-IO-V15',
         suggestedProcessParameter: suggested,
-        parameterCount: descriptor.parameterCount || enrichedParameters.length,
+        parameterCount: descriptor.parameterCount || parameters.length,
         commandCount: descriptor.commandCount || 0,
-        parameters: enrichedParameters,
+        parameters,
         commands,
       });
       return;
@@ -398,6 +525,14 @@ const server = http.createServer(async (req, res) => {
       const portNumber = Number(requestUrl.searchParams.get('portNumber') || defaultPortNumber);
       const parameters = await getEnrichedParameterValues(masterId, portNumber);
       sendJson(res, 200, parameters);
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/api/parameters/names') {
+      const masterId = requestUrl.searchParams.get('masterId') || defaultMasterId;
+      const portNumber = Number(requestUrl.searchParams.get('portNumber') || defaultPortNumber);
+      const all = await callGrpc('GetAllParameters', { masterId, portNumber });
+      sendJson(res, 200, all.parameterNames || []);
       return;
     }
 
@@ -416,6 +551,9 @@ const server = http.createServer(async (req, res) => {
         masterId,
         parameterName,
         portNumber,
+      }, {
+        timeoutMs: Math.max(grpcCallTimeoutMs, 20000),
+        retries: Math.max(1, grpcRetryCount),
       });
 
       if (result.errorCode && result.errorCode !== 0) {
@@ -423,9 +561,14 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const { descriptorByName } = await getDescriptorByName(masterId);
       const mapped = mapVariable(result.variable, parameterName);
-      sendJson(res, 200, enrichParameterWithDescriptor(mapped, descriptorByName));
+      try {
+        const { descriptorByName } = await getDescriptorByName(masterId);
+        sendJson(res, 200, enrichParameterWithDescriptor(mapped, descriptorByName));
+      } catch (_) {
+        // If descriptor lookup is unavailable, return the live read value anyway.
+        sendJson(res, 200, mapped);
+      }
       return;
     }
 
@@ -441,12 +584,17 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      await callGrpc('WriteParameter', {
+      const writeResult = await callGrpc('WriteParameter', {
         masterId,
         parameterName,
         value: value == null ? '' : String(value),
         portNumber,
       });
+
+      if (writeResult?.errorCode && writeResult.errorCode !== 0) {
+        sendError(res, 400, writeResult.errorMessage || 'WriteParameter failed.');
+        return;
+      }
 
       const reread = await callGrpc('ReadParameter', {
         masterId,
@@ -516,12 +664,22 @@ const server = http.createServer(async (req, res) => {
         res.write('event: warning\n');
         res.write(`data: ${JSON.stringify({ message: 'Falling back to polling mode.' })}\n\n`);
 
+        let pollInFlight = false;
+
         timer = setInterval(async () => {
+          if (pollInFlight || isClosed) {
+            return;
+          }
+
+          pollInFlight = true;
           try {
             const read = await callGrpc('ReadParameter', {
               masterId,
               parameterName,
               portNumber,
+            }, {
+              timeoutMs: Math.max(grpcCallTimeoutMs, 6000),
+              retries: 1,
             });
 
             const rawValue = read.variable?.value || '';
@@ -544,8 +702,10 @@ const server = http.createServer(async (req, res) => {
           } catch (err) {
             res.write('event: error\n');
             res.write(`data: ${JSON.stringify({ message: err.message })}\n\n`);
+          } finally {
+            pollInFlight = false;
           }
-        }, 500);
+        }, 1000);
       };
 
       try {

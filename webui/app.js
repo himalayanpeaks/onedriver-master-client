@@ -13,9 +13,11 @@ const state = {
     2: false,
   },
   parameters: [],
+  parameterNames: [],
   activeParameterKind: "All",
   liveSource: null,
   demoTimer: null,
+  connectInFlight: false,
   useDemoMode: true,
 };
 
@@ -49,6 +51,7 @@ const elements = {
   parameterKindTabs: document.getElementById("parameterKindTabs"),
   parameterTableBody: document.getElementById("parameterTableBody"),
   writeForm: document.getElementById("writeForm"),
+  readParameterBtn: document.getElementById("readParameterBtn"),
   writeName: document.getElementById("writeName"),
   writeValue: document.getElementById("writeValue"),
   activityLog: document.getElementById("activityLog"),
@@ -72,11 +75,14 @@ const getApiBaseUrl = () => elements.apiBaseUrl.value.trim().replace(/\/$/, "");
 const DISTANCE_MDC_LABEL = "Distance MDC";
 const DEFAULT_PARAMETER_KIND = "All";
 const PARAMETER_KIND_ORDER = [
-  "Process Data",
   "Standard Params",
-  "System",
   "Specific",
+  "System",
   "Commands",
+  "Events",
+  "PdIn",
+  "PdOut",
+  "Process Data",
   "Other",
 ];
 
@@ -135,6 +141,38 @@ const getParameterDisplayName = (parameter) => {
   }
 
   return humanizeParameterName(parameter?.name);
+};
+
+const escapeHtml = (value) => String(value ?? "")
+  .replace(/&/g, "&amp;")
+  .replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;")
+  .replace(/\"/g, "&quot;")
+  .replace(/'/g, "&#39;");
+
+const renderParameterValueCell = (parameter) => {
+  if (parameter?.value === null || parameter?.value === undefined) {
+    return '<span class="value-empty">n/a</span>';
+  }
+
+  if (typeof parameter.value === "string" && parameter.value.length === 0) {
+    return '<span class="value-empty">(empty)</span>';
+  }
+
+  return escapeHtml(parameter.value);
+};
+
+const updateParameterInState = (parameterName, updater) => {
+  const index = state.parameters.findIndex((parameter) => parameter.name === parameterName);
+  if (index < 0) {
+    return;
+  }
+
+  const current = state.parameters[index];
+  state.parameters[index] = {
+    ...current,
+    ...updater(current),
+  };
 };
 
 const getParameterByInternalName = (name) => state.parameters.find((parameter) => parameter.name === name) || null;
@@ -260,14 +298,34 @@ const setSensorState = (ready, message) => {
   elements.sensorMetric.style.color = ready ? "var(--accent)" : "var(--danger)";
 };
 
+const wait = (ms) => new Promise((resolve) => {
+  window.setTimeout(resolve, ms);
+});
+
 const fetchJson = async (url, options = {}) => {
-  const response = await fetch(url, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
-    ...options,
-  });
+  const { timeoutMs = 6000, ...requestOptions } = options;
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: {
+        "Content-Type": "application/json",
+        ...(requestOptions.headers || {}),
+      },
+      ...requestOptions,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`Request timed out after ${timeoutMs}ms`);
+    }
+
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     const body = await response.text();
@@ -281,10 +339,62 @@ const fetchJson = async (url, options = {}) => {
   return response.json();
 };
 
+const fetchJsonWithRetry = async (url, options = {}, retryOptions = {}) => {
+  const attempts = Math.max(1, Number(retryOptions.attempts || 2));
+  const retryDelayMs = Math.max(100, Number(retryOptions.retryDelayMs || 250));
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fetchJson(url, options);
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        await wait(retryDelayMs * attempt);
+      }
+    }
+  }
+
+  throw lastError || new Error("Request failed.");
+};
+
 const normalizeVariableKind = (parameter) => {
   const rawKind = String(parameter?.variableKind || "").trim();
-  if (!rawKind) {
+  const normalized = rawKind.toLowerCase();
+  if (!normalized) {
     return "Other";
+  }
+
+  if (/^standard|\bstd\b/.test(normalized)) {
+    return "Standard Params";
+  }
+
+  if (/^specific|vendor|application/.test(normalized)) {
+    return "Specific";
+  }
+
+  if (/^system/.test(normalized)) {
+    return "System";
+  }
+
+  if (/^command/.test(normalized)) {
+    return "Commands";
+  }
+
+  if (/^event/.test(normalized)) {
+    return "Events";
+  }
+
+  if (/^pd\s*in|^pdin|process\s*data\s*in|process\s*input/.test(normalized)) {
+    return "PdIn";
+  }
+
+  if (/^pd\s*out|^pdout|process\s*data\s*out|process\s*output/.test(normalized)) {
+    return "PdOut";
+  }
+
+  if (/^process/.test(normalized)) {
+    return "Process Data";
   }
 
   return rawKind;
@@ -345,6 +455,74 @@ const getVisibleParameters = (parameters) => {
   return parameters.filter((parameter) => normalizeVariableKind(parameter) === state.activeParameterKind);
 };
 
+const getParameterNameOptions = () => {
+  const names = state.parameterNames.length
+    ? state.parameterNames
+    : state.parameters.map((parameter) => parameter.name).filter(Boolean);
+
+  const uniqueNames = [...new Set(names.filter(Boolean))];
+  return uniqueNames
+    .map((name) => ({
+      name,
+      label: getParameterLabelFromName(name),
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label));
+};
+
+const renderParameterNameOptions = () => {
+  if (!elements.writeName) {
+    return;
+  }
+
+  const currentValue = String(elements.writeName.value || "").trim();
+  const options = getParameterNameOptions();
+
+  elements.writeName.innerHTML = [
+    '<option value="">Select a parameter below</option>',
+    ...options.map((option) => `<option value="${escapeHtml(option.name)}">${escapeHtml(option.label)}</option>`),
+  ].join("");
+
+  const preferred = currentValue || state.processParameter;
+  if (preferred && options.some((option) => option.name === preferred)) {
+    elements.writeName.value = preferred;
+    return;
+  }
+
+  if (options.length) {
+    elements.writeName.value = options[0].name;
+  }
+};
+
+const loadParameterNames = async () => {
+  const apiBaseUrl = getApiBaseUrl();
+  if (!apiBaseUrl) {
+    state.parameterNames = state.parameters.map((parameter) => parameter.name).filter(Boolean);
+    renderParameterNameOptions();
+    return;
+  }
+
+  try {
+    const names = await fetchJson(`${apiBaseUrl}/api/parameters/names?masterId=${encodeURIComponent(state.masterId)}&portNumber=${encodeURIComponent(state.portNumber)}`, {
+      timeoutMs: 12000,
+    });
+
+    state.parameterNames = Array.isArray(names) ? names.filter(Boolean) : [];
+    renderParameterNameOptions();
+  } catch (error) {
+    state.parameterNames = state.parameters.map((parameter) => parameter.name).filter(Boolean);
+    renderParameterNameOptions();
+    appendLog(`Parameter name list fallback: ${error.message}`);
+  }
+};
+
+const ensureParameterNamesLoaded = async () => {
+  if (state.parameterNames.length) {
+    return;
+  }
+
+  await loadParameterNames();
+};
+
 const renderParameters = (parameters) => {
   const kinds = getParameterKinds(parameters);
   if (!kinds.includes(state.activeParameterKind)) {
@@ -353,6 +531,7 @@ const renderParameters = (parameters) => {
 
   renderParameterKindTabs(kinds);
   const visibleParameters = getVisibleParameters(parameters);
+  renderParameterNameOptions();
 
   if (!parameters.length) {
     elements.parameterTableBody.innerHTML = `<tr><td colspan="6" class="empty-state">No parameters returned.</td></tr>`;
@@ -365,10 +544,10 @@ const renderParameters = (parameters) => {
   }
 
   elements.parameterTableBody.innerHTML = visibleParameters.map((parameter) => `
-    <tr data-name="${parameter.name}">
-      <td><strong>${getParameterDisplayName(parameter)}</strong></td>
-      <td class="value-cell">${parameter.value ?? ""}</td>
-      <td>${parameter.dataType || "-"}</td>
+    <tr data-name="${escapeHtml(parameter.name)}">
+      <td><strong>${escapeHtml(getParameterDisplayName(parameter))}</strong></td>
+      <td class="value-cell">${renderParameterValueCell(parameter)}</td>
+      <td>${escapeHtml(parameter.dataType || "-")}</td>
       <td>${parameter.index ?? 0}</td>
       <td>${parameter.subindex ?? 0}</td>
       <td>
@@ -379,6 +558,104 @@ const renderParameters = (parameters) => {
       </td>
     </tr>
   `).join("");
+};
+
+const readParameterByName = async (parameterNameInput, triggerButton = null) => {
+  let parameterName = resolveParameterName(parameterNameInput);
+  if (!parameterName) {
+    await ensureParameterNamesLoaded();
+    parameterName = resolveParameterName(elements.writeName.value.trim());
+  }
+
+  if (!parameterName && state.parameterNames.length) {
+    parameterName = state.parameterNames[0];
+  }
+
+  if (!parameterName) {
+    appendLog("Select a parameter before reading.");
+    return;
+  }
+
+  const parameterLabel = getParameterLabelFromName(parameterName);
+  const apiBaseUrl = getApiBaseUrl();
+  const button = triggerButton || elements.readParameterBtn;
+
+  elements.writeName.value = parameterName;
+
+  if (!apiBaseUrl) {
+    const parameter = getParameterByInternalName(parameterName);
+    elements.writeValue.value = parameter?.value ?? "";
+    appendLog(`Demo read ${parameterLabel}: ${parameter?.value ?? "n/a"}`);
+    return;
+  }
+
+  if (button) {
+    button.disabled = true;
+  }
+
+  appendLog(`Reading ${parameterLabel}...`);
+  try {
+    const result = await fetchJson(`${apiBaseUrl}/api/parameters/read`, {
+      method: "POST",
+      body: JSON.stringify({
+        masterId: state.masterId,
+        parameterName,
+        portNumber: state.portNumber,
+      }),
+      timeoutMs: 20000,
+    });
+
+    updateParameterInState(parameterName, () => ({
+      value: result?.value ?? "",
+      minimum: result?.minimum,
+      maximum: result?.maximum,
+      dataType: result?.dataType,
+      displayName: result?.displayName,
+      index: result?.index,
+      subindex: result?.subindex,
+      variableKind: result?.variableKind,
+    }));
+
+    const updatedParam = state.parameters.find((parameter) => parameter.name === parameterName);
+    const resultValue = result?.value ?? "";
+    elements.writeValue.value = updatedParam?.value ?? resultValue;
+
+    for (const tr of elements.parameterTableBody.querySelectorAll("tr[data-name]")) {
+      if (tr.dataset.name === parameterName) {
+        tr.querySelector(".value-cell").innerHTML = renderParameterValueCell(updatedParam);
+        break;
+      }
+    }
+
+    updateProcessRange(result?.minimum, result?.maximum);
+
+    const readSnapshot = {
+      parameterName,
+      value: resultValue,
+      rawValue: resultValue,
+      minimum: result?.minimum,
+      maximum: result?.maximum,
+      displayName: result?.displayName,
+      name: parameterName,
+    };
+
+    const signalNumber = getSwitchingSignalNumber(readSnapshot);
+    if (signalNumber) {
+      updateSwitchingSignal(signalNumber, resultValue);
+    }
+
+    if (isDistanceMdcSignal(readSnapshot) || parameterName === state.processParameter) {
+      updateFromParameterValue(parameterName, resultValue, getParameterLabelFromName(parameterName));
+    }
+
+    appendLog(`Read ${parameterLabel}: ${resultValue === "" ? "(empty)" : resultValue}`);
+  } catch (error) {
+    appendLog(`Read failed for ${parameterLabel}: ${error.message}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
 };
 
 const updateSessionLabels = () => {
@@ -397,12 +674,19 @@ const buildDemoParameters = () => [
 ];
 
 const pickProcessParameter = (parameters) => {
-  const preferred = parameters.find((parameter) => isDistanceMdcSignal(parameter))
-    || parameters.find((parameter) => {
+  const processCandidates = parameters.filter((parameter) => {
+    const kind = normalizeVariableKind(parameter);
+    return kind !== "Commands" && kind !== "Events" && kind !== "PdOut";
+  });
+
+  const searchSet = processCandidates.length ? processCandidates : parameters;
+  const preferred = searchSet.find((parameter) => isDistanceMdcSignal(parameter))
+    || searchSet.find((parameter) => {
     const haystack = `${getParameterDisplayName(parameter)} ${parameter.name || ""}`;
     return /distance|range|level|actual|measure|measurement|output/i.test(haystack);
   })
-    || parameters.find((parameter) => /int|uint|float|double/i.test(parameter.dataType))
+    || searchSet.find((parameter) => /int|uint|float|double/i.test(parameter.dataType))
+    || searchSet[0]
     || parameters[0];
 
   return preferred?.name || "DISTANCE_MDC";
@@ -484,8 +768,18 @@ const startDemoStream = () => {
   }, 1000);
 };
 
+const stopDemoStream = () => {
+  if (!state.demoTimer) {
+    return;
+  }
+
+  window.clearInterval(state.demoTimer);
+  state.demoTimer = null;
+};
+
 const startLiveStream = () => {
   const apiBaseUrl = getApiBaseUrl();
+  stopDemoStream();
 
   if (state.liveSource) {
     state.liveSource.close();
@@ -508,12 +802,15 @@ const startLiveStream = () => {
   });
 
   const source = new EventSource(`${apiBaseUrl}/api/process/live?${query.toString()}`);
+  let streamErrorCount = 0;
+
   state.liveSource = source;
   state.useDemoMode = false;
   elements.sourceModeLabel.textContent = "Cloud";
   elements.liveStatusChip.textContent = "Live stream connecting...";
 
   source.onopen = () => {
+    streamErrorCount = 0;
     elements.liveStatusChip.textContent = "Live stream running";
     appendLog("Connected to live process stream.");
   };
@@ -524,11 +821,34 @@ const startLiveStream = () => {
   });
 
   source.onerror = () => {
+    streamErrorCount += 1;
     elements.liveStatusChip.textContent = "Live stream reconnecting...";
+
+    if (streamErrorCount >= 4) {
+      source.close();
+      if (state.liveSource === source) {
+        state.liveSource = null;
+      }
+
+      state.useDemoMode = true;
+      elements.sourceModeLabel.textContent = "Demo";
+      elements.liveStatusChip.textContent = "Live stream demo fallback";
+      appendLog("Live stream failed repeatedly, switched to demo stream.");
+      startDemoStream();
+    }
   };
 };
 
 const connectCloud = async () => {
+  if (state.connectInFlight) {
+    appendLog("Connect already in progress.");
+    return;
+  }
+
+  state.connectInFlight = true;
+  elements.connectBtn.disabled = true;
+  setCloudState(false, "Connecting to cloud bridge...");
+
   state.masterId = elements.masterIdInput.value.trim() || "master-01";
   state.portNumber = Number(elements.portNumberInput.value || 0);
   updateSessionLabels();
@@ -539,25 +859,48 @@ const connectCloud = async () => {
     setCloudState(false, "Demo mode: no API base URL set");
     appendLog("Running in demo mode. Set the API base URL to connect to the cloud bridge.");
     startLiveStream();
+    state.connectInFlight = false;
+    elements.connectBtn.disabled = false;
     return;
   }
 
   try {
-    const session = await fetchJson(`${apiBaseUrl}/api/session`, { method: "GET" });
+    const session = await fetchJsonWithRetry(`${apiBaseUrl}/api/session`, { method: "GET", timeoutMs: 4000 }, {
+      attempts: 3,
+      retryDelayMs: 250,
+    });
+
     if (session?.masterId) {
       state.masterId = session.masterId;
       state.portNumber = session.defaultPortNumber ?? state.portNumber;
       updateSessionLabels();
     }
 
-    setCloudState(Boolean(session?.cloudConfigured ?? true), session?.cloudConfigured ? "Cloud bridge ready" : "Cloud bridge connected");
+    if (session?.cloudConfigured === false) {
+      const reason = session?.cloudMessage || "Cloud bridge reachable, but backend is unavailable.";
+      setCloudState(false, reason);
+      appendLog(reason);
+      state.useDemoMode = true;
+      elements.sourceModeLabel.textContent = "Demo";
+      elements.liveStatusChip.textContent = "Live stream demo fallback";
+      startDemoStream();
+      return;
+    }
+
+    setCloudState(true, session?.cloudMessage || "Cloud bridge ready");
     appendLog("Cloud connection established.");
+    await loadParameterNames();
     startLiveStream();
   } catch (error) {
     setCloudState(false, `Cloud connection failed: ${error.message}`);
     appendLog(`Cloud connection failed: ${error.message}`);
     state.useDemoMode = true;
-    startLiveStream();
+    elements.sourceModeLabel.textContent = "Demo";
+    elements.liveStatusChip.textContent = "Live stream demo fallback";
+    startDemoStream();
+  } finally {
+    state.connectInFlight = false;
+    elements.connectBtn.disabled = false;
   }
 };
 
@@ -570,8 +913,10 @@ const loadSensor = async () => {
 
   if (!apiBaseUrl) {
     state.parameters = buildDemoParameters();
+    state.parameterNames = state.parameters.map((parameter) => parameter.name).filter(Boolean);
     state.processParameter = pickProcessParameter(state.parameters);
     renderParameters(state.parameters);
+    renderParameterNameOptions();
     updateFromParameterValue(state.processParameter, state.parameters[0].value, DISTANCE_MDC_LABEL);
     updateSwitchingSignal(1, state.parameters.find((parameter) => parameter.name === "SP1")?.value);
     updateSwitchingSignal(2, state.parameters.find((parameter) => parameter.name === "SP2")?.value);
@@ -584,6 +929,7 @@ const loadSensor = async () => {
   try {
     const bootstrap = await fetchJson(`${apiBaseUrl}/api/sensor/bootstrap`, {
       method: "POST",
+      timeoutMs: 20000,
       body: JSON.stringify({
         masterId: state.masterId,
         portNumber: state.portNumber,
@@ -591,8 +937,10 @@ const loadSensor = async () => {
     });
 
     state.parameters = bootstrap.parameters || [];
+    state.parameterNames = state.parameters.map((parameter) => parameter.name).filter(Boolean);
     state.processParameter = bootstrap.suggestedProcessParameter || pickProcessParameter(state.parameters);
     renderParameters(state.parameters);
+    await loadParameterNames();
     updateFromParameterValue(
       state.processParameter,
       getParameterByInternalName(state.processParameter)?.value ?? bootstrap.parameters?.[0]?.value ?? "--",
@@ -603,8 +951,10 @@ const loadSensor = async () => {
     startLiveStream();
   } catch (error) {
     state.parameters = buildDemoParameters();
+    state.parameterNames = state.parameters.map((parameter) => parameter.name).filter(Boolean);
     state.processParameter = pickProcessParameter(state.parameters);
     renderParameters(state.parameters);
+    renderParameterNameOptions();
     updateFromParameterValue(state.processParameter, state.parameters[0].value, DISTANCE_MDC_LABEL);
     updateSwitchingSignal(1, state.parameters.find((parameter) => parameter.name === "SP1")?.value);
     updateSwitchingSignal(2, state.parameters.find((parameter) => parameter.name === "SP2")?.value);
@@ -623,15 +973,22 @@ const refreshParameters = async () => {
 
   if (!apiBaseUrl) {
     state.parameters = buildDemoParameters();
+    state.parameterNames = state.parameters.map((parameter) => parameter.name).filter(Boolean);
     renderParameters(state.parameters);
+    renderParameterNameOptions();
     appendLog(`Demo parameters refreshed: ${state.parameters.length} items`);
     return;
   }
 
   try {
-    const parameters = await fetchJson(`${apiBaseUrl}/api/parameters?portNumber=${state.portNumber}`);
+    const parameters = await fetchJson(`${apiBaseUrl}/api/parameters?portNumber=${state.portNumber}`, {
+      timeoutMs: 20000,
+    });
+
     state.parameters = parameters;
+    state.parameterNames = parameters.map((parameter) => parameter.name).filter(Boolean);
     renderParameters(parameters);
+    await loadParameterNames();
     appendLog(`Parameters refreshed: ${parameters.length} items`);
   } catch (error) {
     appendLog(`Parameter refresh failed: ${error.message}`);
@@ -641,6 +998,36 @@ const refreshParameters = async () => {
 elements.connectBtn.addEventListener("click", connectCloud);
 elements.loadSensorBtn.addEventListener("click", loadSensor);
 elements.refreshParamsBtn.addEventListener("click", refreshParameters);
+elements.parameterTableBody.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button) {
+    return;
+  }
+
+  const row = button.closest("tr[data-name]");
+  const parameterName = row?.dataset.name || "";
+  if (!parameterName) {
+    return;
+  }
+
+  const parameterLabel = getParameterLabelFromName(parameterName);
+  const action = button.dataset.action;
+
+  if (action === "edit") {
+    const parameter = getParameterByInternalName(parameterName);
+    elements.writeName.value = parameterName;
+    elements.writeValue.value = parameter?.value ?? "";
+    elements.writeValue.focus();
+    appendLog(`Ready to edit ${parameterLabel}`);
+    return;
+  }
+
+  if (action !== "read") {
+    return;
+  }
+
+  await readParameterByName(parameterName, button);
+});
 elements.parameterKindTabs?.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-kind]");
   if (!button) {
@@ -696,9 +1083,15 @@ elements.writeForm.addEventListener("submit", async (event) => {
     });
 
     const updatedValue = result.parameter?.value ?? value;
-    const row = elements.parameterTableBody.querySelector(`tr[data-name="${CSS.escape(parameterName)}"]`);
-    if (row) {
-      row.querySelector(".value-cell").textContent = updatedValue;
+    updateParameterInState(parameterName, () => ({ value: updatedValue }));
+
+    // Update just the value cell in place — avoids a full table re-render
+    const updatedParam = state.parameters.find((p) => p.name === parameterName);
+    for (const tr of elements.parameterTableBody.querySelectorAll("tr[data-name]")) {
+      if (tr.dataset.name === parameterName) {
+        tr.querySelector(".value-cell").innerHTML = renderParameterValueCell(updatedParam);
+        break;
+      }
     }
 
     appendLog(`Wrote ${parameterLabel} = ${updatedValue}`);
@@ -706,6 +1099,14 @@ elements.writeForm.addEventListener("submit", async (event) => {
   } catch (error) {
     appendLog(`Write failed for ${parameterLabel}: ${error.message}`);
   }
+});
+
+elements.readParameterBtn?.addEventListener("click", async () => {
+  await readParameterByName(elements.writeName.value.trim());
+});
+
+elements.writeName?.addEventListener("focus", async () => {
+  await ensureParameterNamesLoaded();
 });
 
 document.querySelectorAll(".tab-btn").forEach((button) => {
@@ -719,6 +1120,7 @@ const initialize = () => {
   setCloudState(false, savedBaseUrl ? "Cloud bridge waiting" : "Cloud bridge waiting");
   setSensorState(false, "Sensor not loaded");
   renderParameters([]);
+  renderParameterNameOptions();
   setApplication("object");
   updateDistanceRangeLabels();
   updateSwitchingIndicators();
