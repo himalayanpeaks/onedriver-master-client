@@ -135,6 +135,27 @@ function sendError(res, statusCode, message, details) {
   });
 }
 
+function buildAnnouncementRequest(payload, defaults = {}) {
+  const masterId = payload.masterId || defaults.masterId || defaultMasterId;
+  const fallbackPort = Number.isFinite(defaults.portNumber) ? Number(defaults.portNumber) : defaultPortNumber;
+  const portNumber = Number.isFinite(payload.portNumber) ? Number(payload.portNumber) : fallbackPort;
+
+  const request = {
+    masterId,
+    portNumber,
+  };
+
+  if (payload.parameterName) {
+    request.parameterName = payload.parameterName;
+  }
+
+  if (payload.application) {
+    request.application = payload.application;
+  }
+
+  return request;
+}
+
 function normalizeForAnimation(rawValue) {
   const numeric = Number.parseFloat(rawValue);
   if (Number.isNaN(numeric)) {
@@ -632,6 +653,56 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, {
         message: 'Parameter updated.',
         parameter: enrichParameterWithDescriptor(mapped, descriptorByName),
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/process/announcement/start') {
+      const body = await readJsonBody(req);
+      const request = buildAnnouncementRequest(body, {
+        masterId: defaultMasterId,
+        portNumber: defaultPortNumber,
+      });
+
+      const result = await callGrpc('StartProcessDataAnnouncement', request, {
+        timeoutMs: Math.max(grpcCallTimeoutMs, 10000),
+        retries: 1,
+      });
+
+      if (result?.errorCode && result.errorCode !== 0) {
+        sendError(res, 400, result.errorMessage || 'StartProcessDataAnnouncement failed.');
+        return;
+      }
+
+      sendJson(res, 200, {
+        message: 'Process announcement started.',
+        masterId: request.masterId,
+        portNumber: request.portNumber,
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/process/announcement/stop') {
+      const body = await readJsonBody(req);
+      const request = buildAnnouncementRequest(body, {
+        masterId: defaultMasterId,
+        portNumber: defaultPortNumber,
+      });
+
+      const result = await callGrpc('StopProcessDataAnnouncement', request, {
+        timeoutMs: Math.max(grpcCallTimeoutMs, 10000),
+        retries: 1,
+      });
+
+      if (result?.errorCode && result.errorCode !== 0) {
+        sendError(res, 400, result.errorMessage || 'StopProcessDataAnnouncement failed.');
+        return;
+      }
+
+      sendJson(res, 200, {
+        message: 'Process announcement stopped.',
+        masterId: request.masterId,
+        portNumber: request.portNumber,
       });
       return;
     }

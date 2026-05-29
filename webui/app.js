@@ -18,6 +18,8 @@ const state = {
   liveSource: null,
   demoTimer: null,
   connectInFlight: false,
+  readAllInFlight: false,
+  announcementInFlight: false,
   useDemoMode: true,
 };
 
@@ -25,6 +27,9 @@ const elements = {
   connectBtn: document.getElementById("connectBtn"),
   loadSensorBtn: document.getElementById("loadSensorBtn"),
   refreshParamsBtn: document.getElementById("refreshParamsBtn"),
+  readAllParamsBtn: document.getElementById("readAllParamsBtn"),
+  startAnnouncementBtn: document.getElementById("startAnnouncementBtn"),
+  stopAnnouncementBtn: document.getElementById("stopAnnouncementBtn"),
   cloudStatusChip: document.getElementById("cloudStatusChip"),
   sensorStatusChip: document.getElementById("sensorStatusChip"),
   liveStatusChip: document.getElementById("liveStatusChip"),
@@ -995,9 +1000,190 @@ const refreshParameters = async () => {
   }
 };
 
+const setReadAllButtonState = (inFlight, current = 0, total = 0) => {
+  if (!elements.readAllParamsBtn) {
+    return;
+  }
+
+  elements.readAllParamsBtn.disabled = inFlight;
+  elements.readAllParamsBtn.textContent = inFlight
+    ? `Reading ${current}/${total}...`
+    : "Read All Parameters";
+};
+
+const readAllParameters = async () => {
+  if (state.readAllInFlight) {
+    appendLog("Read-all already in progress.");
+    return;
+  }
+
+  if (!state.parameters.length) {
+    appendLog("Load or refresh parameters before reading all.");
+    return;
+  }
+
+  const apiBaseUrl = getApiBaseUrl();
+  if (!apiBaseUrl) {
+    appendLog("Read-all requires an API base URL.");
+    return;
+  }
+
+  const parameterNames = state.parameters
+    .filter((parameter) => {
+      const kind = normalizeVariableKind(parameter);
+      return kind !== "Commands" && kind !== "Events";
+    })
+    .map((parameter) => parameter.name)
+    .filter(Boolean);
+
+  if (!parameterNames.length) {
+    appendLog("No parameter names available to read.");
+    return;
+  }
+
+  state.readAllInFlight = true;
+  setReadAllButtonState(true, 0, parameterNames.length);
+  appendLog(`Reading all parameters with 100ms pacing (${parameterNames.length} items)...`);
+
+  let successCount = 0;
+  for (let i = 0; i < parameterNames.length; i += 1) {
+    const parameterName = parameterNames[i];
+    setReadAllButtonState(true, i + 1, parameterNames.length);
+
+    try {
+      const result = await fetchJson(`${apiBaseUrl}/api/parameters/read`, {
+        method: "POST",
+        body: JSON.stringify({
+          masterId: state.masterId,
+          parameterName,
+          portNumber: state.portNumber,
+        }),
+        timeoutMs: 20000,
+      });
+
+      updateParameterInState(parameterName, () => ({
+        value: result?.value ?? "",
+        minimum: result?.minimum,
+        maximum: result?.maximum,
+        dataType: result?.dataType,
+        displayName: result?.displayName,
+        index: result?.index,
+        subindex: result?.subindex,
+        variableKind: result?.variableKind,
+      }));
+
+      const updatedParam = state.parameters.find((parameter) => parameter.name === parameterName);
+      const row = elements.parameterTableBody.querySelector(`tr[data-name="${CSS.escape(parameterName)}"]`);
+      if (row) {
+        row.querySelector(".value-cell").innerHTML = renderParameterValueCell(updatedParam);
+      }
+
+      const resultValue = result?.value ?? "";
+      const readSnapshot = {
+        parameterName,
+        value: resultValue,
+        rawValue: resultValue,
+        minimum: result?.minimum,
+        maximum: result?.maximum,
+        displayName: result?.displayName,
+        name: parameterName,
+      };
+
+      const signalNumber = getSwitchingSignalNumber(readSnapshot);
+      if (signalNumber) {
+        updateSwitchingSignal(signalNumber, resultValue);
+      }
+
+      if (isDistanceMdcSignal(readSnapshot) || parameterName === state.processParameter) {
+        updateFromParameterValue(parameterName, resultValue, getParameterLabelFromName(parameterName));
+      }
+
+      successCount += 1;
+    } catch (error) {
+      appendLog(`Read failed for ${getParameterLabelFromName(parameterName)}: ${error.message}`);
+    }
+
+    if (i < parameterNames.length - 1) {
+      await wait(100);
+    }
+  }
+
+  appendLog(`Read-all complete: ${successCount}/${parameterNames.length} updated.`);
+  state.readAllInFlight = false;
+  setReadAllButtonState(false);
+};
+
+const setAnnouncementButtonsState = (inFlight) => {
+  if (elements.startAnnouncementBtn) {
+    elements.startAnnouncementBtn.disabled = inFlight;
+  }
+
+  if (elements.stopAnnouncementBtn) {
+    elements.stopAnnouncementBtn.disabled = inFlight;
+  }
+};
+
+const controlAnnouncement = async (action) => {
+  if (state.announcementInFlight) {
+    appendLog("Announcement control already in progress.");
+    return;
+  }
+
+  state.masterId = elements.masterIdInput.value.trim() || "master-01";
+  state.portNumber = Number(elements.portNumberInput.value || 0);
+  updateSessionLabels();
+
+  const apiBaseUrl = getApiBaseUrl();
+  if (!apiBaseUrl) {
+    appendLog("Announcement control requires an API base URL.");
+    return;
+  }
+
+  state.announcementInFlight = true;
+  setAnnouncementButtonsState(true);
+
+  const endpoint = action === "start"
+    ? `${apiBaseUrl}/api/process/announcement/start`
+    : `${apiBaseUrl}/api/process/announcement/stop`;
+
+  const verb = action === "start" ? "Start" : "Stop";
+  appendLog(`${verb} process announcement requested...`);
+
+  try {
+    const response = await fetchJson(endpoint, {
+      method: "POST",
+      body: JSON.stringify({
+        masterId: state.masterId,
+        portNumber: state.portNumber,
+        parameterName: state.processParameter || undefined,
+        application: state.application,
+      }),
+      timeoutMs: 10000,
+    });
+
+    const message = response?.message || `${verb} announcement completed.`;
+    elements.liveStatusChip.textContent = action === "start"
+      ? "Announcement running"
+      : "Announcement stopped";
+    appendLog(message);
+  } catch (error) {
+    appendLog(`${verb} announcement failed: ${error.message}`);
+  } finally {
+    state.announcementInFlight = false;
+    setAnnouncementButtonsState(false);
+  }
+};
+
 elements.connectBtn.addEventListener("click", connectCloud);
 elements.loadSensorBtn.addEventListener("click", loadSensor);
 elements.refreshParamsBtn.addEventListener("click", refreshParameters);
+elements.readAllParamsBtn?.addEventListener("click", readAllParameters);
+elements.startAnnouncementBtn?.addEventListener("click", async () => {
+  await controlAnnouncement("start");
+});
+elements.stopAnnouncementBtn?.addEventListener("click", async () => {
+  await controlAnnouncement("stop");
+});
 elements.parameterTableBody.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) {
