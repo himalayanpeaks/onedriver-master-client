@@ -247,6 +247,22 @@ button {
   margin-bottom: 12px;
 }
 
+.application-view-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.process-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.process-actions .secondary-btn {
+  padding: 0.74rem 1rem;
+}
+
 .tab-switcher {
   display: inline-flex;
   gap: 8px;
@@ -683,6 +699,19 @@ thead th {
   .section-head {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .application-view-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .process-actions {
+    width: 100%;
+  }
+
+  .process-actions .secondary-btn {
+    flex: 1;
   }
 
   .tab-switcher {

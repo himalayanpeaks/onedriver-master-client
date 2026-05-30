@@ -41,9 +41,15 @@
             <p class="eyebrow">Live process visualization</p>
             <h2>Application view</h2>
           </div>
-          <div class="tab-switcher">
-            <button class="tab-btn active" data-application="object">Object Detection</button>
-            <button class="tab-btn" data-application="fluid">Fluid Level Measurement</button>
+          <div class="application-view-actions">
+            <div class="tab-switcher">
+              <button class="tab-btn active" data-application="object">Object Detection</button>
+              <button class="tab-btn" data-application="fluid">Fluid Level Measurement</button>
+            </div>
+            <div class="process-actions" aria-label="Process data controls">
+              <button id="startProcessDataBtn" class="secondary-btn" type="button">Start Process Data</button>
+              <button id="stopProcessDataBtn" class="secondary-btn" type="button">Stop Process Data</button>
+            </div>
           </div>
         </div>
 

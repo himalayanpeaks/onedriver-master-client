@@ -21,6 +21,7 @@ const state = {
   readAllInFlight: false,
   announcementInFlight: false,
   useDemoMode: true,
+  processDataRunning: false,
 };
 
 const elements = {
@@ -28,6 +29,8 @@ const elements = {
   loadSensorBtn: document.getElementById("loadSensorBtn"),
   refreshParamsBtn: document.getElementById("refreshParamsBtn"),
   readAllParamsBtn: document.getElementById("readAllParamsBtn"),
+  startProcessDataBtn: document.getElementById("startProcessDataBtn"),
+  stopProcessDataBtn: document.getElementById("stopProcessDataBtn"),
   startAnnouncementBtn: document.getElementById("startAnnouncementBtn"),
   stopAnnouncementBtn: document.getElementById("stopAnnouncementBtn"),
   cloudStatusChip: document.getElementById("cloudStatusChip"),
@@ -181,6 +184,8 @@ const updateParameterInState = (parameterName, updater) => {
 };
 
 const getParameterByInternalName = (name) => state.parameters.find((parameter) => parameter.name === name) || null;
+
+const isInvalidReadIndex = (parameter) => Number(parameter?.index) === -1;
 
 const getParameterLabelFromName = (name) => {
   const parameter = getParameterByInternalName(name);
@@ -557,7 +562,7 @@ const renderParameters = (parameters) => {
       <td>${parameter.subindex ?? 0}</td>
       <td>
         <div class="row-actions">
-          <button class="row-btn" data-action="read">Read</button>
+          <button class="row-btn" data-action="read" ${isInvalidReadIndex(parameter) ? "disabled title=\"Read not supported for index -1\"" : ""}>Read</button>
           <button class="row-btn" data-action="edit">Edit</button>
         </div>
       </td>
@@ -582,6 +587,12 @@ const readParameterByName = async (parameterNameInput, triggerButton = null) => 
   }
 
   const parameterLabel = getParameterLabelFromName(parameterName);
+  const selectedParameter = getParameterByInternalName(parameterName);
+  if (isInvalidReadIndex(selectedParameter)) {
+    appendLog(`Skipping ${parameterLabel}: index -1 is not readable.`);
+    return;
+  }
+
   const apiBaseUrl = getApiBaseUrl();
   const button = triggerButton || elements.readParameterBtn;
 
@@ -782,14 +793,37 @@ const stopDemoStream = () => {
   state.demoTimer = null;
 };
 
-const startLiveStream = () => {
-  const apiBaseUrl = getApiBaseUrl();
+const syncProcessDataButtons = () => {
+  if (elements.startProcessDataBtn) {
+    elements.startProcessDataBtn.disabled = state.processDataRunning;
+  }
+
+  if (elements.stopProcessDataBtn) {
+    elements.stopProcessDataBtn.disabled = !state.processDataRunning;
+  }
+};
+
+const stopLiveStream = ({ updateStatusChip = true } = {}) => {
   stopDemoStream();
 
   if (state.liveSource) {
     state.liveSource.close();
     state.liveSource = null;
   }
+
+  state.processDataRunning = false;
+  syncProcessDataButtons();
+
+  if (updateStatusChip) {
+    elements.liveStatusChip.textContent = "Live stream stopped";
+  }
+};
+
+const startLiveStream = () => {
+  const apiBaseUrl = getApiBaseUrl();
+  stopLiveStream({ updateStatusChip: false });
+  state.processDataRunning = true;
+  syncProcessDataButtons();
 
   if (!apiBaseUrl) {
     state.useDemoMode = true;
@@ -842,6 +876,23 @@ const startLiveStream = () => {
       startDemoStream();
     }
   };
+};
+
+const startProcessData = async () => {
+  const started = await controlAnnouncement("start");
+  if (!started) {
+    appendLog("Process data start was not applied.");
+    return;
+  }
+
+  startLiveStream();
+  appendLog("Process data started.");
+};
+
+const stopProcessData = async () => {
+  const stopped = await controlAnnouncement("stop");
+  stopLiveStream();
+  appendLog(stopped ? "Process data stopped." : "Process data stop requested locally.");
 };
 
 const connectCloud = async () => {
@@ -1031,7 +1082,7 @@ const readAllParameters = async () => {
   const parameterNames = state.parameters
     .filter((parameter) => {
       const kind = normalizeVariableKind(parameter);
-      return kind !== "Commands" && kind !== "Events";
+      return kind !== "Commands" && kind !== "Events" && !isInvalidReadIndex(parameter);
     })
     .map((parameter) => parameter.name)
     .filter(Boolean);
@@ -1126,7 +1177,7 @@ const setAnnouncementButtonsState = (inFlight) => {
 const controlAnnouncement = async (action) => {
   if (state.announcementInFlight) {
     appendLog("Announcement control already in progress.");
-    return;
+    return false;
   }
 
   state.masterId = elements.masterIdInput.value.trim() || "master-01";
@@ -1136,7 +1187,7 @@ const controlAnnouncement = async (action) => {
   const apiBaseUrl = getApiBaseUrl();
   if (!apiBaseUrl) {
     appendLog("Announcement control requires an API base URL.");
-    return;
+    return false;
   }
 
   state.announcementInFlight = true;
@@ -1166,8 +1217,10 @@ const controlAnnouncement = async (action) => {
       ? "Announcement running"
       : "Announcement stopped";
     appendLog(message);
+    return true;
   } catch (error) {
     appendLog(`${verb} announcement failed: ${error.message}`);
+    return false;
   } finally {
     state.announcementInFlight = false;
     setAnnouncementButtonsState(false);
@@ -1178,6 +1231,8 @@ elements.connectBtn.addEventListener("click", connectCloud);
 elements.loadSensorBtn.addEventListener("click", loadSensor);
 elements.refreshParamsBtn.addEventListener("click", refreshParameters);
 elements.readAllParamsBtn?.addEventListener("click", readAllParameters);
+elements.startProcessDataBtn?.addEventListener("click", startProcessData);
+elements.stopProcessDataBtn?.addEventListener("click", stopProcessData);
 elements.startAnnouncementBtn?.addEventListener("click", async () => {
   await controlAnnouncement("start");
 });

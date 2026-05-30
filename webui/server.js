@@ -140,20 +140,13 @@ function buildAnnouncementRequest(payload, defaults = {}) {
   const fallbackPort = Number.isFinite(defaults.portNumber) ? Number(defaults.portNumber) : defaultPortNumber;
   const portNumber = Number.isFinite(payload.portNumber) ? Number(payload.portNumber) : fallbackPort;
 
-  const request = {
+  // The proto for announcement start/stop only defines master_id.
+  // Keep extra UI fields for HTTP response metadata, not for gRPC payload.
+  return {
+    grpcRequest: { masterId },
     masterId,
     portNumber,
   };
-
-  if (payload.parameterName) {
-    request.parameterName = payload.parameterName;
-  }
-
-  if (payload.application) {
-    request.application = payload.application;
-  }
-
-  return request;
 }
 
 function normalizeForAnimation(rawValue) {
@@ -406,10 +399,19 @@ function enrichParameterWithDescriptor(parameter, descriptorByName) {
 }
 
 async function getEnrichedParameterValues(masterId, portNumber) {
-  const [parameters, { descriptorByName }] = await Promise.all([
-    getAllParameterValues(masterId, portNumber),
-    getDescriptorByName(masterId),
-  ]);
+  const { descriptorByName } = await getDescriptorByName(masterId);
+  const blockedNames = new Set();
+  descriptorByName.forEach((descriptorVariable, name) => {
+    if (!name) {
+      return;
+    }
+
+    if (Number(descriptorVariable?.index) === -1) {
+      blockedNames.add(name);
+    }
+  });
+
+  const parameters = await getAllParameterValues(masterId, portNumber, blockedNames);
 
   const valuesByName = new Map();
   parameters.forEach((parameter) => {
@@ -439,9 +441,9 @@ async function getEnrichedParameterValues(masterId, portNumber) {
   return merged;
 }
 
-async function getAllParameterValues(masterId, portNumber) {
+async function getAllParameterValues(masterId, portNumber, blockedNames = new Set()) {
   const all = await callGrpc('GetAllParameters', { masterId, portNumber });
-  const names = all.parameterNames || [];
+  const names = (all.parameterNames || []).filter((name) => !blockedNames.has(name));
   const values = [];
   const batchSize = 8;
 
@@ -592,6 +594,17 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      try {
+        const { descriptorByName } = await getDescriptorByName(masterId);
+        const descriptorVariable = descriptorByName.get(parameterName);
+        if (Number(descriptorVariable?.index) === -1) {
+          sendError(res, 400, `ReadParameter not allowed for ${parameterName}: index -1.`);
+          return;
+        }
+      } catch (_) {
+        // Continue with direct read if descriptor lookup is unavailable.
+      }
+
       const result = await callGrpc('ReadParameter', {
         masterId,
         parameterName,
@@ -659,12 +672,12 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && pathname === '/api/process/announcement/start') {
       const body = await readJsonBody(req);
-      const request = buildAnnouncementRequest(body, {
+      const announcement = buildAnnouncementRequest(body, {
         masterId: defaultMasterId,
         portNumber: defaultPortNumber,
       });
 
-      const result = await callGrpc('StartProcessDataAnnouncement', request, {
+      const result = await callGrpc('StartProcessDataAnnouncement', announcement.grpcRequest, {
         timeoutMs: Math.max(grpcCallTimeoutMs, 10000),
         retries: 1,
       });
@@ -676,20 +689,20 @@ const server = http.createServer(async (req, res) => {
 
       sendJson(res, 200, {
         message: 'Process announcement started.',
-        masterId: request.masterId,
-        portNumber: request.portNumber,
+        masterId: announcement.masterId,
+        portNumber: announcement.portNumber,
       });
       return;
     }
 
     if (req.method === 'POST' && pathname === '/api/process/announcement/stop') {
       const body = await readJsonBody(req);
-      const request = buildAnnouncementRequest(body, {
+      const announcement = buildAnnouncementRequest(body, {
         masterId: defaultMasterId,
         portNumber: defaultPortNumber,
       });
 
-      const result = await callGrpc('StopProcessDataAnnouncement', request, {
+      const result = await callGrpc('StopProcessDataAnnouncement', announcement.grpcRequest, {
         timeoutMs: Math.max(grpcCallTimeoutMs, 10000),
         retries: 1,
       });
@@ -701,8 +714,8 @@ const server = http.createServer(async (req, res) => {
 
       sendJson(res, 200, {
         message: 'Process announcement stopped.',
-        masterId: request.masterId,
-        portNumber: request.portNumber,
+        masterId: announcement.masterId,
+        portNumber: announcement.portNumber,
       });
       return;
     }
