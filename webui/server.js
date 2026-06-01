@@ -209,6 +209,9 @@ function mapVariable(variable, fallbackName) {
     offset: variable?.offset || 0,
     isDynamic: variable?.isDynamic || false,
     arrayCount: variable?.arrayCount || 0,
+    menuPath: variable?.menuPath || variable?.menu_path || '',
+    valid: variable?.valid || '',
+    validDisplayTexts: variable?.validDisplayTexts || variable?.valid_display_texts || {},
     variableKind: variable?.variableKind || 'Other',
   };
 }
@@ -394,6 +397,14 @@ function enrichParameterWithDescriptor(parameter, descriptorByName) {
     dataType: descriptorVariable?.dataType || parameter.dataType,
     minimum: descriptorVariable?.minimum || parameter.minimum,
     maximum: descriptorVariable?.maximum || parameter.maximum,
+    menuPath: descriptorVariable?.menuPath || descriptorVariable?.menu_path || parameter.menuPath || parameter.menu_path || '',
+    valid: descriptorVariable?.valid || parameter.valid || '',
+    validDisplayTexts:
+      descriptorVariable?.validDisplayTexts
+      || descriptorVariable?.valid_display_texts
+      || parameter.validDisplayTexts
+      || parameter.valid_display_texts
+      || {},
     variableKind: resolveVariableKind(descriptorVariable, parameter, 'parameter'),
   };
 }

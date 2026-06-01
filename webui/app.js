@@ -14,6 +14,7 @@ const state = {
   },
   parameters: [],
   parameterNames: [],
+  activeParameterView: "menu",
   activeParameterKind: "All",
   liveSource: null,
   demoTimer: null,
@@ -56,6 +57,7 @@ const elements = {
   farDistanceLabel: document.getElementById("farDistanceLabel"),
   objectScene: document.getElementById("objectScene"),
   fluidScene: document.getElementById("fluidScene"),
+  parameterViewTabs: document.getElementById("parameterViewTabs"),
   parameterKindTabs: document.getElementById("parameterKindTabs"),
   parameterTableBody: document.getElementById("parameterTableBody"),
   writeForm: document.getElementById("writeForm"),
@@ -82,6 +84,8 @@ const getApiBaseUrl = () => elements.apiBaseUrl.value.trim().replace(/\/$/, "");
 
 const DISTANCE_MDC_LABEL = "Distance MDC";
 const DEFAULT_PARAMETER_KIND = "All";
+const PARAMETER_VIEW_MENU = "menu";
+const PARAMETER_VIEW_KIND = "kind";
 const PARAMETER_KIND_ORDER = [
   "Standard Params",
   "Specific",
@@ -168,6 +172,114 @@ const renderParameterValueCell = (parameter) => {
   }
 
   return escapeHtml(parameter.value);
+};
+
+const parseDelimitedValues = (rawValue) => String(rawValue || "")
+  .split(/[;,|]/)
+  .map((entry) => entry.trim())
+  .filter(Boolean);
+
+const getValidDisplayTextsMap = (parameter) => {
+  const candidates = [
+    parameter?.validDisplayTexts,
+    parameter?.valid_display_texts,
+  ];
+
+  const mapCandidate = candidates.find((candidate) => candidate && typeof candidate === "object" && !Array.isArray(candidate));
+  return mapCandidate || {};
+};
+
+const getParameterValidOptions = (parameter) => {
+  const validDisplayTexts = getValidDisplayTextsMap(parameter);
+  const options = [];
+  const seen = new Set();
+
+  Object.entries(validDisplayTexts).forEach(([valueKey, displayText]) => {
+    const value = String(valueKey || "").trim();
+    if (!value || seen.has(value)) {
+      return;
+    }
+
+    seen.add(value);
+    options.push({
+      value,
+      displayText: String(displayText || "").trim(),
+    });
+  });
+
+  parseDelimitedValues(parameter?.valid).forEach((value) => {
+    if (seen.has(value)) {
+      return;
+    }
+
+    seen.add(value);
+    options.push({ value, displayText: "" });
+  });
+
+  return options;
+};
+
+const isStringLikeDataType = (parameter) => /char|string|text/i.test(String(parameter?.dataType || ""));
+
+const getMenuEditorValue = (parameter) => String(parameter?.value ?? "");
+
+const renderMenuValueEditor = (parameter) => {
+  const options = getParameterValidOptions(parameter);
+  const currentValue = getMenuEditorValue(parameter);
+  if (options.length) {
+    const optionHtml = options.map((option) => {
+      const optionLabel = option.displayText
+        ? `${option.displayText} - ${option.value}`
+        : option.value;
+      const selected = option.value === currentValue ? " selected" : "";
+      return `<option value="${escapeHtml(option.value)}"${selected}>${escapeHtml(optionLabel)}</option>`;
+    }).join("");
+
+    return `
+      <select class="menu-value-editor" data-role="menu-value-editor" aria-label="${escapeHtml(getParameterDisplayName(parameter))}">
+        ${optionHtml}
+      </select>
+    `;
+  }
+
+  const typeHint = isStringLikeDataType(parameter) ? "text" : "numeric";
+  const inputMode = typeHint === "numeric" ? "decimal" : "text";
+  const min = parseFiniteNumber(parameter?.minimum);
+  const max = parseFiniteNumber(parameter?.maximum);
+  const minAttr = min !== null ? ` min="${escapeHtml(min)}"` : "";
+  const maxAttr = max !== null ? ` max="${escapeHtml(max)}"` : "";
+
+  return `
+    <input
+      class="menu-value-editor"
+      data-role="menu-value-editor"
+      type="text"
+      inputmode="${inputMode}"
+      value="${escapeHtml(currentValue)}"
+      ${minAttr}
+      ${maxAttr}
+      aria-label="${escapeHtml(getParameterDisplayName(parameter))}"
+    />
+  `;
+};
+
+const getRowEditorValue = (row) => {
+  const editor = row?.querySelector("[data-role='menu-value-editor']");
+  if (!editor) {
+    const parameterName = row?.dataset?.name || "";
+    return String(getParameterByInternalName(parameterName)?.value ?? "").trim();
+  }
+
+  return String(editor.value ?? "").trim();
+};
+
+const syncRenderedParameterValue = (parameterName) => {
+  const updatedParam = state.parameters.find((parameter) => parameter.name === parameterName);
+  if (!updatedParam) {
+    return;
+  }
+
+  renderParameters(state.parameters);
 };
 
 const updateParameterInState = (parameterName, updater) => {
@@ -441,6 +553,25 @@ const getParameterKinds = (parameters) => {
   });
 };
 
+const getParameterViewLabel = (view) => (view === PARAMETER_VIEW_MENU ? "Menu Variables" : "Variable Kind");
+
+const renderParameterViewTabs = () => {
+  if (!elements.parameterViewTabs) {
+    return;
+  }
+
+  const views = [PARAMETER_VIEW_MENU, PARAMETER_VIEW_KIND];
+  elements.parameterViewTabs.innerHTML = views.map((view) => `
+    <button
+      class="parameter-view-tab-btn${state.activeParameterView === view ? " active" : ""}"
+      data-view="${view}"
+      type="button"
+    >
+      ${getParameterViewLabel(view)}
+    </button>
+  `).join("");
+};
+
 const renderParameterKindTabs = (kinds) => {
   if (!elements.parameterKindTabs) {
     return;
@@ -463,6 +594,65 @@ const getVisibleParameters = (parameters) => {
   }
 
   return parameters.filter((parameter) => normalizeVariableKind(parameter) === state.activeParameterKind);
+};
+
+const getMenuPathParts = (parameter) => {
+  const rawPath = String(
+    parameter?.menuPath
+    ?? parameter?.menu_path
+    ?? parameter?.menu
+    ?? parameter?.menuName
+    ?? "",
+  ).trim();
+
+  if (!rawPath) {
+    return { menu: "Uncategorized", submenu: "General" };
+  }
+
+  const segments = rawPath
+    .split(/[.>|\/\\|]/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+
+  if (!segments.length) {
+    return { menu: "Uncategorized", submenu: "General" };
+  }
+
+  if (segments.length === 1) {
+    return { menu: segments[0], submenu: "General" };
+  }
+
+  return {
+    menu: segments[0],
+    submenu: segments.slice(1).join(" / "),
+  };
+};
+
+const buildMenuGroups = (parameters) => {
+  const grouped = new Map();
+
+  parameters.forEach((parameter) => {
+    const { menu, submenu } = getMenuPathParts(parameter);
+    if (!grouped.has(menu)) {
+      grouped.set(menu, new Map());
+    }
+
+    const submenuMap = grouped.get(menu);
+    if (!submenuMap.has(submenu)) {
+      submenuMap.set(submenu, []);
+    }
+
+    submenuMap.get(submenu).push(parameter);
+  });
+
+  return [...grouped.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([menu, submenuMap]) => ({
+      menu,
+      submenus: [...submenuMap.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([submenu, items]) => ({ submenu, items })),
+    }));
 };
 
 const getParameterNameOptions = () => {
@@ -503,6 +693,51 @@ const renderParameterNameOptions = () => {
   }
 };
 
+const renderParameterRows = (parameters, options = {}) => {
+  const menuView = Boolean(options.menuView);
+  return parameters.map((parameter) => {
+    const showEditor = menuView;
+    const valueCell = showEditor
+      ? renderMenuValueEditor(parameter)
+      : renderParameterValueCell(parameter);
+
+    return `
+      <tr data-name="${escapeHtml(parameter.name)}">
+        <td><strong>${escapeHtml(getParameterDisplayName(parameter))}</strong></td>
+        <td class="value-cell">${valueCell}</td>
+        <td>${escapeHtml(parameter.dataType || "-")}</td>
+        <td>${parameter.index ?? 0}</td>
+        <td>${parameter.subindex ?? 0}</td>
+        <td>
+          <div class="row-actions">
+            <button class="row-btn" data-action="read" ${isInvalidReadIndex(parameter) ? "disabled title=\"Read not supported for index -1\"" : ""}>Read</button>
+            <button class="row-btn" data-action="${menuView ? "write" : "edit"}">${menuView ? "Write" : "Edit"}</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join("");
+};
+
+const renderMenuGroupedRows = (parameters) => {
+  const groups = buildMenuGroups(parameters);
+  return groups.map((group) => {
+    const submenuRows = group.submenus.map((submenuGroup) => `
+      <tr class="submenu-group-row">
+        <td colspan="6">${escapeHtml(submenuGroup.submenu)}</td>
+      </tr>
+      ${renderParameterRows(submenuGroup.items, { menuView: true })}
+    `).join("");
+
+    return `
+      <tr class="menu-group-row">
+        <td colspan="6">${escapeHtml(group.menu)}</td>
+      </tr>
+      ${submenuRows}
+    `;
+  }).join("");
+};
+
 const loadParameterNames = async () => {
   const apiBaseUrl = getApiBaseUrl();
   if (!apiBaseUrl) {
@@ -534,13 +769,21 @@ const ensureParameterNamesLoaded = async () => {
 };
 
 const renderParameters = (parameters) => {
+  renderParameterViewTabs();
+
   const kinds = getParameterKinds(parameters);
   if (!kinds.includes(state.activeParameterKind)) {
     state.activeParameterKind = DEFAULT_PARAMETER_KIND;
   }
 
-  renderParameterKindTabs(kinds);
-  const visibleParameters = getVisibleParameters(parameters);
+  const isMenuView = state.activeParameterView === PARAMETER_VIEW_MENU;
+  if (isMenuView) {
+    elements.parameterKindTabs.innerHTML = "";
+  } else {
+    renderParameterKindTabs(kinds);
+  }
+
+  const visibleParameters = isMenuView ? parameters : getVisibleParameters(parameters);
   renderParameterNameOptions();
 
   if (!parameters.length) {
@@ -549,25 +792,16 @@ const renderParameters = (parameters) => {
   }
 
   if (!visibleParameters.length) {
-    elements.parameterTableBody.innerHTML = `<tr><td colspan="6" class="empty-state">No parameters available in ${state.activeParameterKind}.</td></tr>`;
+    const emptyMessage = isMenuView
+      ? "No parameters available for menu grouping."
+      : `No parameters available in ${state.activeParameterKind}.`;
+    elements.parameterTableBody.innerHTML = `<tr><td colspan="6" class="empty-state">${emptyMessage}</td></tr>`;
     return;
   }
 
-  elements.parameterTableBody.innerHTML = visibleParameters.map((parameter) => `
-    <tr data-name="${escapeHtml(parameter.name)}">
-      <td><strong>${escapeHtml(getParameterDisplayName(parameter))}</strong></td>
-      <td class="value-cell">${renderParameterValueCell(parameter)}</td>
-      <td>${escapeHtml(parameter.dataType || "-")}</td>
-      <td>${parameter.index ?? 0}</td>
-      <td>${parameter.subindex ?? 0}</td>
-      <td>
-        <div class="row-actions">
-          <button class="row-btn" data-action="read" ${isInvalidReadIndex(parameter) ? "disabled title=\"Read not supported for index -1\"" : ""}>Read</button>
-          <button class="row-btn" data-action="edit">Edit</button>
-        </div>
-      </td>
-    </tr>
-  `).join("");
+  elements.parameterTableBody.innerHTML = isMenuView
+    ? renderMenuGroupedRows(visibleParameters)
+    : renderParameterRows(visibleParameters, { menuView: false });
 };
 
 const readParameterByName = async (parameterNameInput, triggerButton = null) => {
@@ -601,6 +835,7 @@ const readParameterByName = async (parameterNameInput, triggerButton = null) => 
   if (!apiBaseUrl) {
     const parameter = getParameterByInternalName(parameterName);
     elements.writeValue.value = parameter?.value ?? "";
+    syncRenderedParameterValue(parameterName);
     appendLog(`Demo read ${parameterLabel}: ${parameter?.value ?? "n/a"}`);
     return;
   }
@@ -629,19 +864,16 @@ const readParameterByName = async (parameterNameInput, triggerButton = null) => 
       displayName: result?.displayName,
       index: result?.index,
       subindex: result?.subindex,
+      menuPath: result?.menuPath || result?.menu_path,
+      valid: result?.valid,
+      validDisplayTexts: result?.validDisplayTexts || result?.valid_display_texts,
       variableKind: result?.variableKind,
     }));
 
     const updatedParam = state.parameters.find((parameter) => parameter.name === parameterName);
     const resultValue = result?.value ?? "";
     elements.writeValue.value = updatedParam?.value ?? resultValue;
-
-    for (const tr of elements.parameterTableBody.querySelectorAll("tr[data-name]")) {
-      if (tr.dataset.name === parameterName) {
-        tr.querySelector(".value-cell").innerHTML = renderParameterValueCell(updatedParam);
-        break;
-      }
-    }
+    syncRenderedParameterValue(parameterName);
 
     updateProcessRange(result?.minimum, result?.maximum);
 
@@ -1120,14 +1352,12 @@ const readAllParameters = async () => {
         displayName: result?.displayName,
         index: result?.index,
         subindex: result?.subindex,
+        menuPath: result?.menuPath || result?.menu_path,
+        valid: result?.valid,
+        validDisplayTexts: result?.validDisplayTexts || result?.valid_display_texts,
         variableKind: result?.variableKind,
       }));
-
-      const updatedParam = state.parameters.find((parameter) => parameter.name === parameterName);
-      const row = elements.parameterTableBody.querySelector(`tr[data-name="${CSS.escape(parameterName)}"]`);
-      if (row) {
-        row.querySelector(".value-cell").innerHTML = renderParameterValueCell(updatedParam);
-      }
+      syncRenderedParameterValue(parameterName);
 
       const resultValue = result?.value ?? "";
       const readSnapshot = {
@@ -1227,6 +1457,87 @@ const controlAnnouncement = async (action) => {
   }
 };
 
+const writeParameterByName = async (parameterNameInput, nextValueInput, options = {}) => {
+  const { triggerButton = null, clearFormValue = false } = options;
+  const parameterName = resolveParameterName(parameterNameInput);
+  const parameterLabel = getParameterLabelFromName(parameterName);
+  const nextValue = String(nextValueInput ?? "").trim();
+
+  if (!parameterName || nextValue.length === 0) {
+    appendLog("Provide a parameter name and value before writing.");
+    return false;
+  }
+
+  const apiBaseUrl = getApiBaseUrl();
+  if (triggerButton) {
+    triggerButton.disabled = true;
+  }
+
+  try {
+    if (!apiBaseUrl) {
+      updateParameterInState(parameterName, () => ({ value: nextValue }));
+      syncRenderedParameterValue(parameterName);
+
+      if (parameterName === state.processParameter) {
+        updateFromParameterValue(parameterName, nextValue);
+      }
+
+      appendLog(`Demo write ${parameterLabel} = ${nextValue}`);
+      if (clearFormValue) {
+        elements.writeValue.value = "";
+      }
+      return true;
+    }
+
+    const result = await fetchJson(`${apiBaseUrl}/api/parameters/write`, {
+      method: "POST",
+      body: JSON.stringify({
+        masterId: state.masterId,
+        parameterName,
+        value: nextValue,
+        portNumber: state.portNumber,
+      }),
+    });
+
+    const updated = result?.parameter || {};
+    const updatedValue = updated.value ?? nextValue;
+
+    updateParameterInState(parameterName, () => ({
+      value: updatedValue,
+      minimum: updated.minimum,
+      maximum: updated.maximum,
+      dataType: updated.dataType,
+      displayName: updated.displayName,
+      index: updated.index,
+      subindex: updated.subindex,
+      menuPath: updated.menuPath || updated.menu_path,
+      valid: updated.valid,
+      validDisplayTexts: updated.validDisplayTexts || updated.valid_display_texts,
+      variableKind: updated.variableKind,
+    }));
+
+    syncRenderedParameterValue(parameterName);
+
+    if (parameterName === state.processParameter) {
+      updateFromParameterValue(parameterName, updatedValue, getParameterLabelFromName(parameterName));
+    }
+
+    appendLog(`Wrote ${parameterLabel} = ${updatedValue}`);
+    if (clearFormValue) {
+      elements.writeValue.value = "";
+    }
+
+    return true;
+  } catch (error) {
+    appendLog(`Write failed for ${parameterLabel}: ${error.message}`);
+    return false;
+  } finally {
+    if (triggerButton) {
+      triggerButton.disabled = false;
+    }
+  }
+};
+
 elements.connectBtn.addEventListener("click", connectCloud);
 elements.loadSensorBtn.addEventListener("click", loadSensor);
 elements.refreshParamsBtn.addEventListener("click", refreshParameters);
@@ -1263,6 +1574,12 @@ elements.parameterTableBody.addEventListener("click", async (event) => {
     return;
   }
 
+  if (action === "write") {
+    const value = getRowEditorValue(row);
+    await writeParameterByName(parameterName, value, { triggerButton: button });
+    return;
+  }
+
   if (action !== "read") {
     return;
   }
@@ -1284,62 +1601,27 @@ elements.parameterKindTabs?.addEventListener("click", (event) => {
   renderParameters(state.parameters);
 });
 
+elements.parameterViewTabs?.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-view]");
+  if (!button) {
+    return;
+  }
+
+  const selectedView = button.dataset.view;
+  if (!selectedView || state.activeParameterView === selectedView) {
+    return;
+  }
+
+  state.activeParameterView = selectedView;
+  renderParameters(state.parameters);
+});
+
 elements.writeForm.addEventListener("submit", async (event) => {
   event.preventDefault();
 
   const parameterNameInput = elements.writeName.value.trim();
   const value = elements.writeValue.value.trim();
-
-  if (!parameterNameInput || !value) {
-    appendLog("Provide a parameter name and value before writing.");
-    return;
-  }
-
-  const parameterName = resolveParameterName(parameterNameInput);
-  const parameterLabel = getParameterLabelFromName(parameterName);
-
-  const apiBaseUrl = getApiBaseUrl();
-
-  if (!apiBaseUrl) {
-    const row = elements.parameterTableBody.querySelector(`tr[data-name="${CSS.escape(parameterName)}"]`);
-    if (row) {
-      row.querySelector(".value-cell").textContent = value;
-    }
-
-    updateFromParameterValue(parameterName, value);
-    appendLog(`Demo write ${parameterLabel} = ${value}`);
-    elements.writeValue.value = "";
-    return;
-  }
-
-  try {
-    const result = await fetchJson(`${apiBaseUrl}/api/parameters/write`, {
-      method: "POST",
-      body: JSON.stringify({
-        masterId: state.masterId,
-        parameterName,
-        value,
-        portNumber: state.portNumber,
-      }),
-    });
-
-    const updatedValue = result.parameter?.value ?? value;
-    updateParameterInState(parameterName, () => ({ value: updatedValue }));
-
-    // Update just the value cell in place — avoids a full table re-render
-    const updatedParam = state.parameters.find((p) => p.name === parameterName);
-    for (const tr of elements.parameterTableBody.querySelectorAll("tr[data-name]")) {
-      if (tr.dataset.name === parameterName) {
-        tr.querySelector(".value-cell").innerHTML = renderParameterValueCell(updatedParam);
-        break;
-      }
-    }
-
-    appendLog(`Wrote ${parameterLabel} = ${updatedValue}`);
-    elements.writeValue.value = "";
-  } catch (error) {
-    appendLog(`Write failed for ${parameterLabel}: ${error.message}`);
-  }
+  await writeParameterByName(parameterNameInput, value, { clearFormValue: true });
 });
 
 elements.readParameterBtn?.addEventListener("click", async () => {
